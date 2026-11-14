@@ -1,0 +1,59 @@
+name: Publish Rex for Umbrel
+
+on:
+  push:
+    tags:
+      - 'umbrel-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and test the tagged Rex source
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#umbrel-v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          cargo test --locked --manifest-path rust/Cargo.toml --lib
+          cargo build --locked --release --manifest-path rust/Cargo.toml
+          mkdir -p docker/dist/amd64
+          cp rust/target/release/rex docker/dist/amd64/
+          cp LICENSE docker/dist/amd64/
+
+      - name: Package and verify the Umbrel image
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#umbrel-v}"
+          image="localhost:5000/rex-personal:$version"
+          docker build --platform linux/amd64 -t "$image" docker
+          docker run --detach --rm --name rex-smoke --network none --tmpfs /config \
+            -e REX_PLEXTV_URL=http://127.0.0.1:9 "$image" --gdm off
+          trap 'docker stop rex-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..30}; do
+            if docker exec rex-smoke bash -ec 'exec 3<>/dev/tcp/127.0.0.1/32400
+              printf "GET /identity HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3
+              head -n 1 <&3 | grep -q " 200 "'; then
+              break
+            fi
+            [[ "$attempt" != 30 ]]
+            sleep 1
+          done
+          mkdir -p release
+          docker save "$image" | gzip -1 > release/rex-umbrel-linux-amd64.tar.gz
+          cp LICENSE release/
+          (cd release && sha256sum rex-umbrel-linux-amd64.tar.gz > SHA256SUMS)
+
+      - name: Publish the tested archive
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --latest \
+            --title "Rex ${GITHUB_REF_NAME#umbrel-v} for Umbrel" --generate-notes \
+            release/rex-umbrel-linux-amd64.tar.gz release/SHA256SUMS release/LICENSE
