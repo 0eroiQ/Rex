@@ -177,9 +177,14 @@ results = []
 
 
 def on_container_network():
-    """Whether the default route leaves through a veth (Docker, Podman or LXC without host
-    networking), as rex reads it off /proc/net/route and sysfs: then it announces no LAN address
-    and sends no lanIp, since nothing outside that network reaches one. Linux only."""
+    """Whether the default route leaves through a veth inside a container engine's network
+    (Docker, Podman or Kubernetes without host networking: its marker), as rex reads it off
+    /proc/net/route and sysfs: then it announces no LAN address and sends no lanIp, since nothing
+    outside that network reaches one. An LXC container's bridged veth carries the LAN's own
+    address and leaves no marker (rex#22). Linux only."""
+    if not (os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+            or os.environ.get("KUBERNETES_SERVICE_HOST") is not None):
+        return False
     try:
         with open("/proc/net/route") as table:
             iface = next(line.split()[0] for line in list(table)[1:] if line.split()[1:2] == ["00000000"])

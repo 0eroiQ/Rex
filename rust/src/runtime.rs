@@ -26703,27 +26703,43 @@ fn virtual_link(ifindex: &str, iflink: &str) -> bool {
     ifindex.trim() != iflink.trim()
 }
 
-/// Whether the address rex reaches the world from sits on a container network: Docker, Podman
-/// or LXC without host networking, where the default route leaves through a veth. Nothing
-/// outside that network reaches such an address, so it is no LAN address to announce or to
-/// hand rex-direct's provider; `--announce-url` names the real one. Linux only, where those
-/// networks live.
+/// Whether the address rex reaches the world from sits on a container engine's network: Docker,
+/// Podman or Kubernetes without host networking, where the default route leaves through a
+/// virtual link. Nothing outside that network reaches such an address, so it is no LAN address to
+/// announce or to hand rex-direct's provider; `--announce-url` names the real one. A virtual link
+/// alone is no such network: an LXC container (or a bare network namespace) on a bridge to the
+/// LAN leaves through a veth too, with the LAN's own address (rex#22, measured on zen 2026-11-15,
+/// `lxc_bridge_eth0.txt`: eth0 2/920, 192.168.10.128/24), and it leaves no engine's marker.
+/// Linux only, where those networks live.
 fn on_container_network() -> bool {
     #[cfg(target_os = "linux")]
     {
         let read = |path: String| std::fs::read_to_string(path).ok();
-        let Some(iface) = read("/proc/net/route".to_string()).and_then(|table| default_route_interface(&table)) else {
-            return false;
-        };
-        let (Some(ifindex), Some(iflink)) =
-            (read(format!("/sys/class/net/{iface}/ifindex")), read(format!("/sys/class/net/{iface}/iflink")))
-        else {
-            return false;
-        };
-        virtual_link(&ifindex, &iflink)
+        // Docker's `/.dockerenv` (measured on zen, 2026-11-15), Podman's `/run/.containerenv`, and
+        // the variable the kubelet sets in every pod. Unmeasured: rootless Docker's marker, and
+        // that a containerd pod leaves neither file.
+        let engine = std::path::Path::new("/.dockerenv").exists()
+            || std::path::Path::new("/run/.containerenv").exists()
+            || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some();
+        let table = read("/proc/net/route".to_string()).unwrap_or_default();
+        container_network(&table, engine, |iface| {
+            Some((read(format!("/sys/class/net/{iface}/ifindex"))?, read(format!("/sys/class/net/{iface}/iflink"))?))
+        })
     }
     #[cfg(not(target_os = "linux"))]
     false
+}
+
+/// `on_container_network` off what it read: the route table, whether a container engine left
+/// its marker, and an interface's `ifindex` and `iflink`.
+// ponytail: a Docker macvlan with a LAN address is still refused -- its sysfs reads as a veth's
+// (zen 2026-11-15); telling them apart needs the driver's name (ethtool), not read here.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn container_network(route_table: &str, engine: bool, link: impl Fn(&str) -> Option<(String, String)>) -> bool {
+    engine
+        && default_route_interface(route_table)
+            .and_then(|iface| link(&iface))
+            .is_some_and(|(ifindex, iflink)| virtual_link(&ifindex, &iflink))
 }
 
 /// `local_interface_address` when it is an address other devices on the LAN can reach: not one
@@ -30085,6 +30101,22 @@ mod announce_tests {
         // The bridged container's eth0 read 2/87, the host's eno1 and a host-networked container's 2/2.
         assert!(virtual_link("2\n", "87\n"));
         assert!(!virtual_link("2\n", "2\n"));
+    }
+
+    #[test]
+    fn an_lxc_containers_bridged_veth_is_a_lan_address() {
+        // rex#22: an LXC container on a bridge to the LAN, as reproduced on zen on 2026-11-15 (a
+        // network namespace, a veth on a bridge, 192.168.10.128/24 and its default route; eth0
+        // 2/920). A veth, but no Docker, Podman or Kubernetes marker: the address is the LAN's.
+        let lxc = include_str!("../../tests/fixtures/proc_net_route/lxc_bridge_eth0.txt");
+        let bridged = include_str!("../../tests/fixtures/proc_net_route/docker_bridge_eth0.txt");
+        let host = include_str!("../../tests/fixtures/proc_net_route/zen_host_eno1.txt");
+        let link = |ifindex: &'static str, iflink: &'static str| move |_: &str| Some((ifindex.to_string(), iflink.to_string()));
+        assert!(!container_network(lxc, false, link("2\n", "920\n")), "an LXC's bridged veth announces its LAN address");
+        // Docker's bridge (2/87, /.dockerenv) still announces none; its host networking (2/2) does.
+        assert!(container_network(bridged, true, link("2\n", "87\n")));
+        assert!(!container_network(host, true, link("2\n", "2\n")));
+        assert!(!container_network("", true, link("2\n", "87\n")), "no default route");
     }
 
     #[test]
