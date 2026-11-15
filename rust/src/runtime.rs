@@ -729,6 +729,9 @@ pub struct Runtime {
     /// A subtitle apply or automatic search a route asked for (`subtitles.rs`), run on a
     /// thread of its own once the lock is released.
     pending_subtitle: Option<subtitles::Job>,
+    /// The version a playback decision last played of each item of several (`subtitles_decided`):
+    /// what automatic subtitles, and a search or apply naming no `mediaItemID`, are for.
+    played_media: HashMap<String, String>,
     pending_subtitle_read: Option<subtitles::ReadJob>,
     /// A VobSub's `.sub` a stream read asked for: read off the lock from its source (`vobsub_read`).
     pending_vobsub: Option<subtitles::VobSubRead>,
@@ -1063,6 +1066,7 @@ impl Runtime {
             agent_answers: HashMap::new(),
             pending_auto_collections: false,
             pending_subtitle: None,
+            played_media: HashMap::new(),
             pending_subtitle_read: None,
             pending_vobsub: None,
             analysis_jobs,
@@ -9004,9 +9008,13 @@ impl Runtime {
             }
             ("GET" | "HEAD" | "OPTIONS", "/music/:/transcode/universal/decision") => self.route_music_decision(&query, request),
             ("GET" | "HEAD" | "OPTIONS", "/video/:/transcode/universal/decision") => {
-                // The item's subtitle job, if one is finding the account's subtitle, ends first.
+                // The item's subtitle job, if one is finding the account's subtitle, ends first:
+                // one for the version this decision plays, started here if none is.
                 let path = query.get("path").map(String::as_str).unwrap_or_default();
                 let key = path.split("/library/metadata/").nth(1).and_then(|tail| tail.split(['/', '?']).next()).unwrap_or("");
+                if request.method == "GET" {
+                    self.subtitles_decided(key, &query);
+                }
                 if self.subtitle_wait(key) {
                     Response::empty(200)
                 } else {
@@ -13830,7 +13838,7 @@ impl Runtime {
             let playing = queue.items.iter().find(|item| Some(item.id) == queue.selected).map(|item| item.rating_key.clone());
             self.queues.insert(id, queue);
             if let Some((key, row)) = playing.and_then(|key| Some((key.clone(), self.catalog.get(&key)?.clone()))) {
-                self.subtitles_wanted(&key, &row, true);
+                self.subtitles_wanted(&key, &row, true, None);
             }
             return response;
         }
@@ -18949,7 +18957,7 @@ impl Runtime {
             }
             // The requesting account's subtitle, found before its playback picks the tracks.
             if request.method == "GET" {
-                self.subtitles_wanted(key, row, false);
+                self.subtitles_wanted(key, row, false, None);
             }
             let checks_requested = ["checkFiles", "asyncCheckFiles", "checkFileAvailability"]
                 .iter()
@@ -24542,6 +24550,10 @@ fn handle_connection<S: Read + Write + PollRead>(
             // A route that needs Plex's agent asked for it (`agent_answer`): it is asked here
             // with the lock released, and the request routed again with its answer.
             for _ in 0..2 {
+                // A subtitle job the route started runs before anything waits on it (a decision's).
+                if let Some(job) = guard.pending_subtitle.take() {
+                    subtitles::spawn(&runtime, job);
+                }
                 let Some((key, call)) = guard.pending_agent.take() else {
                     break;
                 };

@@ -13984,6 +13984,15 @@ verdicts, is `tests/fixtures/subtitles/sync_corpus.json.gz`.
   against keeps the best-named candidate unchecked, and the play queue's job measures the
   candidates against the audio and puts the kept stream right in place, same id and key
   (`test_subtitles.py`'s S05E08). Browsing reads no audio.
+- An item of several versions (two releases of one episode folded into one row): each is its own,
+  and only the playback decision says which is played (`mediaIndex`); the detail request and the
+  play queue carry none. So a decision starts the job for the version it plays, waited up to 3 s
+  as above, and rex keeps that version for the item; a play queue of such an item with none kept
+  leaves the job to the decision, and a search or apply with no `mediaItemID` is for the kept
+  version, else the first. A job, a miss and an unchecked pick are per version (its Part). Before
+  2026-11-15 every one went to the first version while the second played (Discord #rex-support,
+  2026-11-13; `test_subtitles.py`'s S05E10). Unmeasured: what a real PMS does with no
+  `mediaItemID` on such an item, and whether Plex for Apple TV sends one.
 
 **Measured against the corpus** (`subtitles.rs`' corpus test, rex's ranking and meter on the
 fixture's energy masks and cues; a pick is right when its truth is in sync and rex left it alone,
