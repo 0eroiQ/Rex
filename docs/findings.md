@@ -16037,8 +16037,8 @@ check waiting for the minute's end: at most about 65 s while the checks are answ
 a 5xx or a network failure the gap grows, to 10 min at most). Two fresh claims read their access
 tokens 200 from the first second (40 reads), so the early 403 above was not seen again; a notice with the
 token working had it asked once, 200, nothing marked. No check on a timer was added, since the
-notice came on every removal measured. Not measured: whether Authorized Devices' Remove, signing out
-of all devices or a password change send the notice, and rex-direct's provider live (off throughout;
+notice came on every removal measured. Not measured: whether Authorized Devices' Remove or a password
+change send the notice (signing out of all devices sends another, below), and rex-direct's provider live (off throughout;
 `tests/test_rex_direct.py` drives it against a stub). `tests/test_plextv.py`, `refused_claim`.
 
 **Signing out of all devices** (measured later the same day on zen, lab account, twice). Plex Web has
@@ -16069,7 +16069,8 @@ claim: the provider's 403 0.5 s after the exchange, `servers.xml` at 1.0 s, pubs
 failed announce. 55 s in, its device row already held its LAN connection but
 `publicAddress="128.140.121.142"`: dmm-01, the host DMM's provider runs on, not the home line, and
 `lastSeenAt` was the second of the provider's call. It was listed between +184 s and +211 s, and
-rex's first heartbeat beat (600 s from its start at 10:11:56) fell at +195 s.
+rex's first heartbeat beat (600 s from its start at 10:11:56) fell at +195 s; a beat that succeeds logs
+nothing, so that this beat listed it is inferred from the timing.
 
 Measured on zen the same day with the lab account (`tests/fixtures/plextv_provider_address_2026_11_16.json`),
 scratch rex 841e7bc6, a 3600 s heartbeat so no beat fell in the window, the provider a stand-in on
@@ -16079,7 +16080,7 @@ dmm-01 making DMM's `plexServerOwner` calls header for header:
 |---|---|---|
 | rex-direct off | 3 | 5.1 to 5.3 s |
 | re-claim after its device was removed, off | 1 | 5.1 s |
-| DMM's real provider, from zen's own line | 1 | 5.2 s |
+| DMM's real provider (dmm-01), once, stopped before its minute retry | 1 | 5.2 s |
 | a real PMS (pms-docker 1.43.5, new config) | 1 | 2.5 s (the first poll) |
 | provider on dmm-01, its write applied before rex's announce | 11 | 5.3 to 8.7 s |
 | provider on dmm-01, its write applied after rex's announce | 3 | not in 240 s, 900 s, 900 s |
@@ -16106,7 +16107,8 @@ dmm-01 making DMM's `plexServerOwner` calls header for header:
 So rex looks for itself after each provider call (`plextv::settle_after_provider`): 10, 30 and 70 s
 after it, it reads `/api/v2/resources` as the heartbeat does, now matched on the machineIdentifier
 rather than the name (an account can hold several servers named alike), and announces again when
-missing, then stops. The provider is not changed: no header keeps its call off the server's row.
+the read leaves it out, then stops; a read that fails (a refused token, plex.tv down) or a server with no
+address to announce is left to the heartbeat rather than logged three more times per provider call. The provider is not changed: no header keeps its call off the server's row.
 `tests/test_rex_direct.py` leg 4c, the provider's write landing 7.8 s on as the latest measured did.
 
 Live on zen with the fix (88ffee06), the provider stand-in on dmm-01 answering its 403 at once and asking
