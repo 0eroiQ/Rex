@@ -274,7 +274,11 @@ the private key) and serves a start the provider does not answer. A 202 is a pro
 issuing the certificate: an INFO, asked again after its `retryAfter` (15 s..10 min). Any other
 refusal or an unreachable provider is a WARN and never fatal. A thread registers again every
 6 h, which is the dynamic DNS and swaps in a renewed certificate without a restart, and every
-10 min after a failure. `tests/test_rex_direct.py` drives it against a stub provider and plex.tv.
+10 min after a failure. The provider's plex.tv check with the token makes plex.tv take the provider's
+address for the server's and drop it from `/api/v2/resources` until rex announces again, so 10, 30 and
+70 s after each registration rex looks for itself there (by machineIdentifier) and announces when
+missing (`plextv::settle_after_provider`; findings, "The provider's address, taken for the server's").
+`tests/test_rex_direct.py` drives it against a stub provider and plex.tv.
 
 A real claim -- `POST /myplex/claim?token=` with a token from `plex.tv/api/claim/token.json`,
 once per machineIdentifier -- makes rex register the way a real PMS does (findings, "The

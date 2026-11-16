@@ -417,9 +417,12 @@ impl RexDirect {
     }
 
     /// Register with the claim's server token and serve what comes back.
-    fn attempt(&self, previous: Option<&Registration>, plextv: &PlexTv, offer_ipv6: bool) -> Result<Registration, Later> {
+    fn attempt(&self, previous: Option<&Registration>, plextv: &Arc<PlexTv>, offer_ipv6: bool) -> Result<Registration, Later> {
         let token = super::plextv::claim_token(&plextv.claim).ok_or_else(|| Later::Failed("not claimed".to_string()))?;
-        let fresh = self.register(&plextv.claim, &token, offer_ipv6)?;
+        let registered = self.register(&plextv.claim, &token, offer_ipv6);
+        // Whatever it answered, the provider may have asked plex.tv with the token (`settle_after_provider`).
+        super::plextv::settle_after_provider(Arc::clone(plextv));
+        let fresh = registered?;
         self.apply(&fresh, previous, plextv).map_err(Later::Failed)?;
         Ok(fresh)
     }

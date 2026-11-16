@@ -1693,8 +1693,9 @@ fn announce(claim: &SharedClaim, token: &str, machine: &str, url: &str, name: &s
 
 /// `heartbeat.is_visible`: is the server in the list every client reads?
 /// Asked as this server (`machine`), as a real PMS asks plex.tv everything; one fixed
-/// identifier shared by every install was trivial for plex.tv to single out.
-fn is_visible(claim: &SharedClaim, token: &str, name: &str, machine: &str) -> Result<bool, String> {
+/// identifier shared by every install was trivial for plex.tv to single out. Matched on the
+/// machine, not the name: an account can hold several servers named alike ("Pixel 6").
+fn is_visible(claim: &SharedClaim, token: &str, machine: &str) -> Result<bool, String> {
     let headers = [
         ("X-Plex-Token", token.to_string()),
         ("X-Plex-Client-Identifier", machine.to_string()),
@@ -1707,7 +1708,7 @@ fn is_visible(claim: &SharedClaim, token: &str, name: &str, machine: &str) -> Re
         .as_array()
         .ok_or_else(|| "'dict' object has no attribute 'get'".to_string())?;
     Ok(rows.iter().any(|row| {
-        row.get("name").and_then(Value::as_str) == Some(name)
+        row.get("clientIdentifier").and_then(Value::as_str) == Some(machine)
             && row
                 .get("provides")
                 .and_then(Value::as_str)
@@ -1730,6 +1731,32 @@ impl Beat {
         let token = claim_token(claim).ok_or("no claim to announce with")?;
         announce(claim, &token, &self.machine, &self.url, &self.name, &snapshot(claim).version)
     }
+}
+
+/// rex-direct's provider asks plex.tv with the claim's token from its own address, and plex.tv
+/// takes that address for the server's (`publicAddress`) and drops it from /api/v2/resources until
+/// rex announces again (zen, 2026-11-16: 5 of 5 asked after the announce, 3 of 8 claims where the
+/// provider's write landed up to ~7 s after the claim's announce; the Cube waited for its next
+/// beat). So after each provider call rex looks for itself there and announces when it is missing.
+const PROVIDER_SETTLE: [Duration; 3] = [Duration::from_secs(10), Duration::from_secs(20), Duration::from_secs(40)];
+
+pub(crate) fn settle_after_provider(plextv: Arc<PlexTv>) {
+    let _ = thread::Builder::new().name("rex-direct-settle".to_string()).spawn(move || {
+        for wait in PROVIDER_SETTLE {
+            thread::sleep(wait);
+            let beat = plextv.beat.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+            let (Some(beat), Some(token)) = (beat, claim_token(&plextv.claim)) else {
+                return;
+            };
+            if is_visible(&plextv.claim, &token, &beat.machine) == Ok(true) {
+                return;
+            }
+            match beat.beat(&plextv.claim) {
+                Ok(()) => info!("not in /api/v2/resources after rex-direct's provider asked plex.tv; announced again"),
+                Err(message) => error!("announcing again after rex-direct's provider failed: {message}"),
+            }
+        }
+    });
 }
 
 /// `heartbeat.Heartbeat.start`: re-announce on an interval, on its own thread. The target is
@@ -1767,7 +1794,7 @@ pub(crate) fn start_heartbeat(plextv: Arc<PlexTv>, interval: u64) {
                     failures = 0;
                     // Verifying costs a second request but turns a silent
                     // disappearance into a log line.
-                    if !is_visible(&claim, &token, &beat.name, &beat.machine)? {
+                    if !is_visible(&claim, &token, &beat.machine)? {
                         warning!(
                             "announced but NOT visible in /api/v2/resources -- clients cannot see rex right now"
                         );
