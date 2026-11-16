@@ -115,5 +115,40 @@
     "first_401_s": 0.65
    }
   ]
+ },
+ "pubsub_after_sign_out_everywhere": {
+  "provenance": "2026-11-16 16:21 and 16:26 UTC, lab account, scratch rex on zen claimed and pubsub open. Signing out of all devices is the account page's password change with \"Sign out connected devices after password change\" checked: PUT clients.plex.tv/api/v2/user?includeSubscriptions=1&includeProviders=1&includeSettings=0&includeSharedSettings=0 with password, passwordConfirmation and currentPassword (here the unchanged password) and resetDevices true, which answered 204 sent as Plex Web and 403 code 1068 \"This action is not available for this device.\" with another X-Plex-Product. Every token of the account answered 401 after it, the caller's own included; every device row stayed. The second run's raw lines below were read on a second claimed server's stream with its own token (its rex stopped); the rex on the first server logged the same two commands at the same second. Seconds from the PUT's start; the stream stayed open with its keepalives.",
+  "events": [
+   {
+    "after_s": 2.296,
+    "data": "data: <Message command=\"notifyResetToken\"/>\n"
+   },
+   {
+    "after_s": 2.297,
+    "data": "\n"
+   },
+   {
+    "after_s": 2.367,
+    "data": "data: <Message command=\"notifyAccountChange\"/>\n"
+   },
+   {
+    "after_s": 2.367,
+    "data": "\n"
+   }
+  ],
+  "access_token_read": [
+   {
+    "run": 1,
+    "notice_s": 2.054,
+    "first_401_s": 2.28,
+    "rex": "841e7bc6 + 88ffee06: notifyResetToken unhandled, still refused false 66 s on (heartbeat an hour away)"
+   },
+   {
+    "run": 2,
+    "notice_s": 2.296,
+    "first_401_s": 2.583,
+    "rex": "with notifyResetToken asked: plex.tv asked 7.4 s on, refused 7.7 s on"
+   }
+  ]
  }
 }

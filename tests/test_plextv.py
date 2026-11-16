@@ -1512,6 +1512,27 @@ def refused_claim():
               seen and took < 15 and len(subscriptions(SERVER_TOKEN, 0)) == 1, (took, running.output()[-1500:]))
         running.stop()
 
+        # Signing out of all devices (the account page's resetDevices) revokes the server token with
+        # its device row kept: the open stream gets notifyResetToken and notifyAccountChange, and
+        # nothing else came (REMOVED's pubsub_after_sign_out_everywhere; a patron's rex went dead two
+        # days after one).
+        stub.clear()
+        stub.refused = set()
+        stub.pubsub_hold = 120
+        running = Instance(fresh(), free_port(), stub_port, extra=quiet, plex_token=None)
+        wait_for(lambda: subscriptions(SERVER_TOKEN, 0), 10)
+        time.sleep(1)
+        reset_at = precise_time()
+        stub.refused = {SERVER_TOKEN}
+        with stub.lock:
+            stub.pubsub_lines = [event["data"] for event in REMOVED["pubsub_after_sign_out_everywhere"]["events"]]
+        seen = wait_for(lambda: claim_body(running).get("refused"), 30)
+        took = precise_time() - reset_at
+        check("signed out of all devices: refused within seconds (%.0f s), on notifyResetToken" % took,
+              seen and took < 15 and len(re.findall(asked % "pubsub: notifyResetToken", running.output(), re.M)) == 1,
+              (took, claim_state(running), running.output()[-1500:]))
+        running.stop()
+
         # A stream that ends is answered 403 when rex subscribes again (the patron's log, the Cube's).
         stub.clear()
         stub.refused = set()

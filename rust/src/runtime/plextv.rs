@@ -1554,9 +1554,11 @@ fn command(payload: &str, claim: &SharedClaim, access: Option<&Arc<Access>>) {
         }
         // Sent on the stream of a server whose device was just removed, which plex.tv leaves open
         // (2026-11-16), and to the account's other servers when a device is added or removed.
-        Some("notifyFavoritesChange") => {
-            info!("pubsub: notifyFavoritesChange");
-            suspect(claim, "pubsub: notifyFavoritesChange", SUSPECT_NOTIFY_DELAY);
+        // notifyResetToken: sent to every server of the account when it signs out of all devices
+        // (the account page's resetDevices, 2026-11-16), its token 401 a quarter second later.
+        Some(name @ ("notifyFavoritesChange" | "notifyResetToken")) => {
+            info!("pubsub: {name}");
+            suspect(claim, &format!("pubsub: {name}"), SUSPECT_NOTIFY_DELAY);
         }
         // ponytail: other commands are logged, not acted on.
         other => info!("pubsub: unhandled command {}", other.unwrap_or("None")),
