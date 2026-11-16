@@ -15990,7 +15990,8 @@ the owner read, the webhooks, the resources check, the device PUT, `servers.xml`
 refused, logged once as a WARNING; a 2xx from one of them clears it (an INFO). A 403, a 5xx and a
 network failure leave it as it is, as do pubsub (403 here), the features read (200 here) and
 rex-direct, whose 401 is its provider's (a wrong `REX_DIRECT_KEY` is one too) and which was off in
-the measurement. The refusal is kept in memory only: a restart finds it again on its first calls.
+the measurement. Those signs only have plex.tv asked (`plextv::suspect`, below). The refusal is kept
+in memory only: a restart finds it again on its first calls.
 
 It is shown at `GET /rex/claim`, rex's own and answered only to rex's own networks with no token
 (the gate `POST /myplex/claim` keeps unclaimed): `{"claimed": bool, "refused": bool,
@@ -16010,3 +16011,32 @@ exchanged, and the new token's next calls answered 200 (access tokens, owner, we
 device PUT; `servers.xml` its usual 422) and plex.tv listed the server again. **The access-token
 read made a second after the exchange answered 403** and the same call 200 a minute later: a fresh
 server token is not yet everywhere on plex.tv, one more reason a 403 marks nothing.
+
+**Seen within seconds, not at the heartbeat** (measured later the same day on zen, lab account,
+`REX_DIRECT_URL=off`). Of the calls above only the 600 s heartbeat ran on its own, so a running rex
+marked the removal at its next beat: 9 min 22 s on the Fire TV Cube, 6 min 18 s and 6 min 21 s for two
+scratch rex (ae2d690c and a build that asked plex.tv on pubsub's 403 alone) whose devices were removed
+together. Neither got a 403: **plex.tv left the removed server's pubsub stream open**, still sending
+its `: -1` keepalive every 10 s, and sent `notifyFavoritesChange` on it twice in the second of the
+removal (0.47 to 0.6 s after the DELETE began, before it returned; the fixture's
+`pubsub_after_removal`). The same message reaches the account's other servers, and came to both
+when another server of the account was claimed; the removed server got no later ones. The removed
+token's access-token read, asked every 0.5 s, answered 200 up to 0.13 to 0.22 s before the DELETE
+and 401 from the first read after it returned (0.65 to 0.74 s). The patron's and the Cube's pubsub
+403s come from subscribing again once a stream has ended; why theirs ended is not known.
+
+So `notifyFavoritesChange`, a pubsub 403 and rex-direct's provider answering 401 or 403 each have
+the access-token read asked (`plextv::suspect`), the notice 5 s on (`SUSPECT_NOTIFY_DELAY`), the
+others at once; its 401 marks the claim as any 401 does, a 403, a 5xx or a 200 marks nothing. One
+check at a time and one a minute at most (`SUSPECT_GAP`), the gap doubling to 10 min while the read
+fails without a 401 and back to a minute once it is answered; a sign inside the gap is checked when
+the gap ends, not dropped, and none is checked while the claim is already refused. Nothing is
+exchanged or dropped. Measured with that build: a removal was marked **6.1 s** after the DELETE, and
+29.6 s after one that came 36 s after a check (another server's claim had sent the notice), the
+check waiting for the minute's end: at most about 65 s while the checks are answered (after a 403,
+a 5xx or a network failure the gap grows, to 10 min at most). Two fresh claims read their access
+tokens 200 from the first second (40 reads), so the early 403 above was not seen again; a notice with the
+token working had it asked once, 200, nothing marked. No check on a timer was added, since the
+notice came on every removal measured. Not measured: whether Authorized Devices' Remove, signing out
+of all devices or a password change send the notice, and rex-direct's provider live (off throughout;
+`tests/test_rex_direct.py` drives it against a stub). `tests/test_plextv.py`, `refused_claim`.

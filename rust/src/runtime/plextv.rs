@@ -57,6 +57,14 @@ const ACCESS_REFRESH_WINDOW: Duration = Duration::from_secs(6);
 /// `claim.PUBSUB_TIMEOUT` / `PUBSUB_RETRY` (the probe PMS, measured).
 const PUBSUB_TIMEOUT: u64 = 20;
 const PUBSUB_RETRY: u64 = 15;
+/// The least time between two of `suspect`'s checks, doubled up to `SUSPECT_GAP_MAX` while they
+/// fail without a 401 and back to this once one is answered: a pubsub refused every PUBSUB_RETRY
+/// seconds has plex.tv asked once a minute at most.
+const SUSPECT_GAP: Duration = Duration::from_secs(60);
+const SUSPECT_GAP_MAX: Duration = Duration::from_secs(600);
+/// How long after `notifyFavoritesChange` `suspect` asks: it came in the second of a device's
+/// removal, before the DELETE had returned (2026-11-16).
+const SUSPECT_NOTIFY_DELAY: Duration = Duration::from_secs(5);
 
 /// `heartbeat.DEFAULT_INTERVAL`: a registration lease is ~40 minutes (measured).
 pub(crate) const HEARTBEAT_INTERVAL: u64 = 600;
@@ -402,6 +410,10 @@ pub(crate) struct Claim {
     /// When plex.tv first answered 401 to a call made with `token` (`verdict`), until one is
     /// answered 2xx again. Memory only: a start finds out again on its first calls.
     pub refused_since: Option<i64>,
+    /// When `suspect` last asked plex.tv, and how long until it may ask again, and whether a check
+    /// is waiting to. Memory only.
+    pub suspected: Option<(std::time::Instant, Duration)>,
+    pub suspect_pending: bool,
 }
 
 pub(crate) type SharedClaim = Arc<Mutex<Claim>>;
@@ -429,6 +441,8 @@ impl Claim {
             access_tokens: Vec::new(),
             access_grants: Vec::new(),
             refused_since: None,
+            suspected: None,
+            suspect_pending: false,
         };
         if !claim.path.exists() {
             return claim;
@@ -682,6 +696,53 @@ pub(crate) fn refused_since(claim: &SharedClaim) -> Option<i64> {
     state.refused_since.filter(|_| state.claimed())
 }
 
+/// A sign that plex.tv may no longer take the claim's server token, from something that cannot say
+/// so itself: pubsub's `notifyFavoritesChange`, its 403, and rex-direct's provider refusing the token.
+/// Measured 2026-11-16 (findings, "A claim whose device was removed"): removing the server's device
+/// left rex's pubsub stream open, with no 403, and sent `notifyFavoritesChange` on it in the second of
+/// the removal; the same message comes when another device of the account is added, a fresh token's
+/// first calls can answer 403, and the provider's 401 is also a wrong key's, so none marks the claim.
+/// Each has plex.tv asked, `delay` on, on a thread of its own, with the access-token read, whose 401
+/// `verdict` takes as it takes any: seen within seconds, not at the next heartbeat (up to 10 min).
+/// One check at a time, at most once per gap (`SUSPECT_GAP`, doubling to `SUSPECT_GAP_MAX` while the
+/// read fails without a 401); a sign inside the gap waits for its end rather than being lost. None
+/// while the claim is already refused (the heartbeat sees it accepted again); nothing is exchanged
+/// or dropped.
+pub(crate) fn suspect(claim: &SharedClaim, why: &str, delay: Duration) {
+    let wait = {
+        let mut state = claim.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // ponytail: a sign arriving while a check waits is folded into it; a removal's notice in the
+        // second before that check asks can be answered 200 and wait for the heartbeat. Narrow (it
+        // needs another notice 5 s before); run the check again for such a sign if it is ever seen.
+        if !state.claimed() || state.refused_since.is_some() || state.suspect_pending {
+            return;
+        }
+        state.suspect_pending = true;
+        state.suspected.map_or(Duration::ZERO, |(at, gap)| gap.saturating_sub(at.elapsed())).max(delay)
+    };
+    let (claim, why) = (Arc::clone(claim), why.to_string());
+    let _ = thread::Builder::new().name("rex-claim-check".to_string()).spawn(move || {
+        thread::sleep(wait);
+        {
+            let mut state = claim.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.suspect_pending = false;
+            if !state.claimed() || state.refused_since.is_some() {
+                return;
+            }
+            let gap = state.suspected.map_or(SUSPECT_GAP, |(_, gap)| gap);
+            state.suspected = Some((std::time::Instant::now(), gap));
+        }
+        info!("{why}; asking plex.tv whether the claim's server token still works");
+        let read = fetch_access_tokens(&claim, None);
+        if let Err(message) = &read {
+            error!("access tokens read failed: {message}");
+        }
+        if let Some((_, gap)) = &mut claim.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).suspected {
+            *gap = if read.is_ok() { SUSPECT_GAP } else { (*gap * 2).min(SUSPECT_GAP_MAX) };
+        }
+    });
+}
+
 /// `urlopen` for a call made with the claim's server token `token`, telling `verdict` its answer.
 fn urlopen_as(
     claim: &SharedClaim,
@@ -809,6 +870,7 @@ pub(crate) fn exchange(claim: &SharedClaim, claim_token: &str) -> Result<(), Str
         state.access_tokens.clear();
         state.access_grants.clear();
         state.refused_since = None;
+        state.suspected = None;
         state.save();
         state.owner.clone()
     };
@@ -1449,6 +1511,9 @@ fn subscribe(claim: &SharedClaim, access: Option<&Arc<Access>>) -> Result<(), St
     )
     .map_err(|error| format!("<urlopen error {error}>"))?;
     if response.status >= 400 {
+        if matches!(response.status, 401 | 403) {
+            suspect(claim, &format!("pubsub answered {}", response.status), Duration::ZERO);
+        }
         return Err(Failure::Http(response.status, Vec::new()).to_string());
     }
     info!("pubsub subscribed for {}", current.machine);
@@ -1486,6 +1551,12 @@ fn command(payload: &str, claim: &SharedClaim, access: Option<&Arc<Access>>) {
             if let Some(access) = access {
                 access.reread(claim);
             }
+        }
+        // Sent on the stream of a server whose device was just removed, which plex.tv leaves open
+        // (2026-11-16), and to the account's other servers when a device is added or removed.
+        Some("notifyFavoritesChange") => {
+            info!("pubsub: notifyFavoritesChange");
+            suspect(claim, "pubsub: notifyFavoritesChange", SUSPECT_NOTIFY_DELAY);
         }
         // ponytail: other commands are logged, not acted on.
         other => info!("pubsub: unhandled command {}", other.unwrap_or("None")),

@@ -419,6 +419,13 @@ def main():
         check("...the refusal is a WARN with the provider's status and reason",
               logged(log, "WARNING", r"rex-direct: registration failed: HTTP 401 \(%s\); retrying in 10 min"
                      % re.escape(REFUSAL)), log[-3000:])
+        # The provider checks the token with plex.tv, so its 401 may be plex.tv's (a removed device,
+        # 2026-11-16): rex asks plex.tv itself, with the access-token read, beside the start's own.
+        check("...and has plex.tv asked whether the claim's token still works",
+              logged(log, "INFO", r"rex-direct's provider answered HTTP 401 \(%s\); asking plex\.tv whether the "
+                     r"claim's server token still works" % re.escape(REFUSAL))
+              and len(stub.taken("/plex.tv/api/v2/server/access_tokens")) == 2,
+              (len(stub.taken("/plex.tv/api/v2/server/access_tokens")), log[-3000:]))
 
         # 3b. Bound to loopback rex has no LAN address, so the request names none.
         loopback = os.path.join(work, "loopback")

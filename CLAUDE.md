@@ -305,7 +305,10 @@ spike's unclaimed announce with zurg's account token rewrote the account's "zurg
 with 409, unless plex.tv refuses its server token: a 401 to a call made with it (never a 403, 5xx
 or network failure) marks the claim refused until a 2xx, shown only at rex's own `GET /rex/claim`
 (rex's networks, no token; never in `/identity`), and a new claim from those networks replaces it.
-rex never drops or re-exchanges a claim by itself, though a real PMS drops one plex.tv refuses
+pubsub's `notifyFavoritesChange` (sent on a removed server's stream, which plex.tv keeps open) or
+403 and rex-direct's provider refusing the token mark nothing themselves: they have the access-token
+read asked, once a minute at most (`plextv::suspect`), so a removed device is marked in seconds, not
+at the 600 s heartbeat. rex never drops or re-exchanges a claim by itself, though a real PMS drops one plex.tv refuses
 (findings, "A claim whose device was removed").
 
 `rex.db`, `rex.env`, `run.sh` and `rex-direct.json` are gitignored: the catalog and

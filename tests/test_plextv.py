@@ -364,6 +364,14 @@ class Stub(ThreadingHTTPServer):
         # instead of REMOVED's 401s and 403 for SERVER_TOKEN, when one is set.
         self.refused = set()
         self.fail_status = None
+        # A status pubsub alone answers the server token, as REMOVED's 403: a pubsub refused
+        # while every other call with that token works.
+        self.pubsub_status = None
+        # How long a stream is held open after the verdict, and lines written on it meanwhile:
+        # plex.tv kept a removed server's stream open and sent it REMOVED's notifyFavoritesChange.
+        self.pubsub_hold = 3
+        self.pubsub_lines = []
+        self.pubsub_streams = 0  # the newest stream alone writes `pubsub_lines`
 
     def handle_error(self, request, client_address):
         # A stopped rex hangs up on its pubsub stream. socketserver printed the
@@ -438,6 +446,9 @@ class StubHandler(BaseHTTPRequestHandler):
         query = dict(record["query"])
         token = query.get("X-Plex-Token") or query.get("auth_token") or dict(record["headers"]).get("x-plex-token")
         refused = token in self.server.refused
+        if self.server.pubsub_status and token == SERVER_TOKEN and record["host"] == "pubsub.plex.tv":
+            row = REMOVED["calls"][-1]
+            return self.server.pubsub_status, row["content_type"], row["body"].encode("utf-8")
         if not refused and not (self.server.fail_status and token == SERVER_TOKEN):
             return None
         for row in REMOVED["calls"]:
@@ -478,7 +489,21 @@ class StubHandler(BaseHTTPRequestHandler):
                              % dict(asked["query"]).get("asyncIdentifier"), VERDICT)
             self.wfile.write(verdict.encode("utf-8") + b": -1\n")
             self.wfile.flush()
-        time.sleep(3)
+        held = beat = precise_time()
+        keepalive = REMOVED["pubsub_after_removal"]["keepalive"]
+        with self.server.lock:
+            self.server.pubsub_streams += 1
+            stream = self.server.pubsub_streams
+        while precise_time() - held < self.server.pubsub_hold and stream == self.server.pubsub_streams:
+            with self.server.lock:
+                lines, self.server.pubsub_lines = self.server.pubsub_lines, []
+            if precise_time() - beat >= keepalive["every_s"]:
+                beat = precise_time()
+                lines.append(keepalive["data"])
+            for line in lines:
+                self.wfile.write(line.encode("utf-8"))
+                self.wfile.flush()
+            time.sleep(0.1)
 
     do_GET = do_PUT = do_POST = do_DELETE = _handle
 
@@ -1426,6 +1451,113 @@ def refused_claim():
         check("said once, as an INFO",
               len(accepted_line.findall(failing.output())) == 1, failing.output()[-1500:])
         failing.stop()
+
+        # -- a removed device's claim is seen within seconds, not at the next heartbeat -------
+        # On 2026-11-16 the first call that could mark a removed device's claim was the 600 s
+        # heartbeat, 9 min 22 s on (6 min 18 s on zen). plex.tv left the removed server's pubsub stream
+        # open and sent it notifyFavoritesChange (REMOVED's pubsub_after_removal); a stream that ends
+        # is answered 403. The heartbeat is an hour away here, so only those can have the claim marked.
+        quiet = ("--heartbeat-interval", 3600)
+        asked = r"^\d\d:\d\d:\d\d INFO    %s; asking plex\.tv whether the claim's server token still works$"
+        notified = [event["data"] for event in REMOVED["pubsub_after_removal"]["events"]]
+
+        def token_reads(since):
+            return [r for r in stub.taken("plex.tv", "/api/v2/server/access_tokens", "GET")
+                    if dict(r["query"]).get("auth_token") == SERVER_TOKEN and r["at"] >= since]
+
+        stub.clear()
+        stub.refused = set()
+        stub.pubsub_hold = 120
+        running = Instance(fresh(), free_port(), stub_port, extra=quiet, plex_token=None)
+        check("a working claim with no heartbeat due: subscribed and not refused",
+              wait_for(lambda: subscriptions(SERVER_TOKEN, 0), 10) and claim_body(running).get("refused") is False,
+              claim_state(running))
+        time.sleep(1)
+        added_at = precise_time()
+        with stub.lock:
+            stub.pubsub_lines = list(notified)
+        check("notifyFavoritesChange with the token working (another device added): plex.tv asked once, nothing marked",
+              wait_for(lambda: token_reads(added_at), 15) and claim_body(running).get("refused") is False
+              and len(re.findall(asked % "pubsub: notifyFavoritesChange", running.output(), re.M)) == 1,
+              (token_reads(added_at), claim_state(running), running.output()[-1500:]))
+        # The device removed in the gap the first check leaves: the check waits for its end.
+        removed_at = precise_time()
+        stub.refused = {SERVER_TOKEN}
+        with stub.lock:
+            stub.pubsub_lines = list(notified)
+        seen = wait_for(lambda: claim_body(running).get("refused"), 90)
+        took = precise_time() - removed_at
+        check("the device removed while the stream stays open: refused once the minute's gap ends (%.0f s on), on the"
+              " stream's own notice, not at the next heartbeat" % took,
+              seen and took < 70 and len(subscriptions(SERVER_TOKEN, 0)) == 1
+              and not [r for r in refused_beats() if r["at"] >= removed_at],
+              (took, claim_state(running), running.output()[-1500:]))
+        check("the refusal said once",
+              len(refused_line.findall(running.output())) == 1, running.output()[-1500:])
+        running.stop()
+
+        # With no check in the last minute, the notice has plex.tv asked about 5 s on.
+        stub.clear()
+        stub.refused = set()
+        running = Instance(fresh(), free_port(), stub_port, extra=quiet, plex_token=None)
+        wait_for(lambda: subscriptions(SERVER_TOKEN, 0), 10)
+        time.sleep(1)
+        removed_at = precise_time()
+        stub.refused = {SERVER_TOKEN}
+        with stub.lock:
+            stub.pubsub_lines = list(notified)
+        seen = wait_for(lambda: claim_body(running).get("refused"), 30)
+        took = precise_time() - removed_at
+        check("a first notice: refused within seconds (%.0f s)" % took,
+              seen and took < 15 and len(subscriptions(SERVER_TOKEN, 0)) == 1, (took, running.output()[-1500:]))
+        running.stop()
+
+        # A stream that ends is answered 403 when rex subscribes again (the patron's log, the Cube's).
+        stub.clear()
+        stub.refused = set()
+        stub.pubsub_hold = 3
+        running = Instance(fresh(), free_port(), stub_port, extra=quiet, plex_token=None)
+        wait_for(lambda: subscriptions(SERVER_TOKEN, 0), 10)
+        removed_at = precise_time()
+        stub.refused = {SERVER_TOKEN}
+        seen = wait_for(lambda: claim_body(running).get("refused"), 40)
+        took = precise_time() - removed_at
+        check("a stream that ends: refused within a pubsub retry (%.0f s), by the read pubsub's 403 asked for" % took,
+              seen and took < 30 and token_reads(removed_at)
+              and len(re.findall(asked % "pubsub answered 403", running.output(), re.M)) == 1,
+              (took, claim_state(running), running.output()[-1500:]))
+        running.stop()
+
+        # A pubsub refused with the token working: plex.tv asked once in four refusals (once a
+        # minute at most), its 200 marks nothing, and the claim is kept as it was.
+        stub.clear()
+        stub.refused = set()
+        stub.pubsub_status = 403
+        started = precise_time()
+        flapping = Instance(fresh(), free_port(), stub_port, extra=quiet, plex_token=None)
+        wait_for(lambda: len(subscriptions(SERVER_TOKEN, started)) >= 4, 70)
+        check("pubsub refused four times in a row: one access-token read beside the start's, not refused",
+              len(subscriptions(SERVER_TOKEN, started)) >= 4 and len(token_reads(started)) == 2
+              and claim_body(flapping) == {"claimed": True, "refused": False, "refused_since": None, "owner": OWNER},
+              (len(subscriptions(SERVER_TOKEN, started)), len(token_reads(started)), claim_state(flapping)))
+        check("and the claim is not exchanged or dropped",
+              not stub.taken("plex.tv", "/api/claim/exchange", "POST")
+              and read_json(os.path.join(directories[-1], "claim_state.json")).get("token") == SERVER_TOKEN)
+        flapping.stop()
+        stub.pubsub_status = None
+
+        # A 403 to that read (a fresh token's first answer, 2026-11-16) marks nothing either.
+        stub.clear()
+        stub.fail_status = 403
+        started = precise_time()
+        doubtful = Instance(fresh(), free_port(), stub_port, extra=quiet, plex_token=None)
+        wait_for(lambda: len(token_reads(started)) >= 2, 20)
+        time.sleep(0.5)
+        check("pubsub's 403 asks plex.tv, and the read's own 403 does not make the claim refused",
+              len(token_reads(started)) >= 2 and claim_body(doubtful).get("refused") is False
+              and not refused_line.findall(doubtful.output()), (len(token_reads(started)), claim_state(doubtful)))
+        doubtful.stop()
+        stub.fail_status = None
     finally:
         for instance in LIVE:
             if instance.proc.poll() is None:

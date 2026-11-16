@@ -76,5 +76,44 @@
   "access tokens read failed: HTTP Error 401: Unauthorized",
   "servers.xml POST -> 401",
   "pubsub failed: HTTP Error 403: Forbidden; resubscribing in 15s"
- ]
+ ],
+ "pubsub_after_removal": {
+  "provenance": "2026-11-16, later the same day: two scratch rex on zen claimed to the lab account, pubsub open; the timed one's device removed with DELETE plex.tv/devices/<id>.xml at t=0 (the call took 0.5 s). plex.tv did not close the removed server's pubsub stream or answer it 403: it went on sending keepalives, and both servers' streams got the two events below in the second of the removal (the removed one's rex logged them at the same second; these raw lines were read on the other server's stream, with its own live token). The removed token's access-token read, asked every 0.5 s, answered 200 up to just before the DELETE and 401 from the first read after it returned. Seconds from the DELETE's start; the events are the second removal's (the first's came 0.526 and 0.598 s on).",
+  "events": [
+   {
+    "after_s": 0.465,
+    "data": "data: <Message command=\"notifyFavoritesChange\"/>\n"
+   },
+   {
+    "after_s": 0.465,
+    "data": "\n"
+   },
+   {
+    "after_s": 0.472,
+    "data": "data: <Message command=\"notifyFavoritesChange\"/>\n"
+   },
+   {
+    "after_s": 0.472,
+    "data": "\n"
+   }
+  ],
+  "keepalive": {
+   "data": ": -1\n",
+   "every_s": 10
+  },
+  "access_token_read": [
+   {
+    "run": 1,
+    "delete_returned_s": 0.539,
+    "last_200_s": -0.126,
+    "first_401_s": 0.743
+   },
+   {
+    "run": 2,
+    "delete_returned_s": 0.502,
+    "last_200_s": -0.223,
+    "first_401_s": 0.65
+   }
+  ]
+ }
 }
