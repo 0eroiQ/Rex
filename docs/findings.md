@@ -15982,7 +15982,7 @@ the same day, `tests/fixtures/plextv_device_removed_2026_11_16.json`:
   `signInState="invalid"`, `mappingError="badauth"`. Whether a running PMS does the same on its own
   schedule was not measured.
 
-What rex does, which is **not** what that PMS does, by decision: rex keeps the claim (the token
+What rex did at first, which was **not** what that PMS does (a start now drops it, below): rex kept the claim (the token
 gate, `claim_state.json`, `claimed="1"`) and never drops or exchanges one on its own, since a claim
 redeemed again is what reset the account's tokens on 2026-09-11. It records the refusal instead
 (`plextv::verdict`): a 401 to a call made with the claim's current token -- the access-token read,
@@ -16004,6 +16004,21 @@ access tokens of the old one), the old list stops letting its account in, the ne
 heartbeat and rex-direct pick up the new token on their next turn. A working claim still answers
 another claim 409 (401 with no token, from the gate, as before). `tests/test_plextv.py`,
 `refused_claim`.
+
+**Dropped at a start, as the PMS does (Ben, later on 2026-11-16).** A running rex still only marks
+the refusal. A start whose first call, the access-token read, plex.tv answers 401 drops the claim
+(`plextv::drop_refused_claim`), logging `Token was invalid, resetting security` as plexlab's PMS did:
+`claim_state.json` keeps the machineIdentifier and version and loses the token, owner, account id,
+features and access lists, nothing is registered with the dead token (no `servers.xml`, no pubsub),
+`/identity` says `claimed="0"` and `GET /rex/claim` `{"claimed": false, ...}`, which the zurg app and
+rex-android already read as Sign in to Plex. The PMS's `/myplex/account` then answered
+`signInState="invalid"`, `mappingError="badauth"`; rex answers that path 401 to everyone while unclaimed
+(its unclaimed gate), so there is nothing to mirror. A 403, a 5xx or no answer at a start keeps the
+claim, and the running refusal path takes over. Live on zen, lab account: a scratch rex claimed, its
+device removed (19:00:03 UTC) and rex stopped, then started at 19:00:17.75: its first calls were 401,
+the claim was dropped at 19:00:18 and `/rex/claim` said unclaimed from 19:00:19; a new claim token
+POSTed from the LAN was taken in 0.8 s and the server listed again. `tests/test_plextv.py`,
+`refused_claim` (`pms_restart` in the fixture).
 
 Run live the same day on the lab rex whose device was removed: `GET /rex/claim` answered
 `"refused": true` from the first second, a new claim token POSTed with no token from the LAN was
