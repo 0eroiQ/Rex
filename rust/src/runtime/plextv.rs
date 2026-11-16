@@ -1750,7 +1750,9 @@ pub(crate) fn settle_after_provider(plextv: Arc<PlexTv>) {
             let (Some(beat), Some(token)) = (beat, claim_token(&plextv.claim)) else {
                 return;
             };
-            if is_visible(&plextv.claim, &token, &beat.machine) == Ok(true) {
+            // Only a list read that leaves rex out: a refused token, plex.tv down or no address to
+            // announce is the heartbeat's to report, not three more failures per provider call.
+            if with_lan(&beat.url).is_empty() || is_visible(&plextv.claim, &token, &beat.machine) != Ok(false) {
                 return;
             }
             match beat.beat(&plextv.claim) {

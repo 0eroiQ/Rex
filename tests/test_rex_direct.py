@@ -89,6 +89,8 @@ class Stub(ThreadingHTTPServer):
         # seconds on: /api/v2/resources leaves the server out until its next device PUT (leg 4c).
         self.move_after = None
         self.moved = False
+        # A status /api/v2/resources answers instead, as plex.tv answers a refused token 401.
+        self.resources_status = None
         # (status, body) answered before `status`, one per register request.
         self.queue = []
 
@@ -130,6 +132,9 @@ class Handler(BaseHTTPRequestHandler):
             status, kind = 200, "application/xml"
             body = ('<?xml version="1.0" encoding="UTF-8"?>\n<device clientIdentifier="%s"/>\n'
                     % MACHINE).encode()
+        elif target.path == "/plex.tv/api/v2/resources" and self.server.resources_status:
+            status, kind = self.server.resources_status, "application/json"
+            body = json.dumps({"errors": [{"code": 1001, "message": "User could not be authenticated"}]}).encode()
         elif target.path == "/plex.tv/api/v2/resources":
             status, kind = 200, "application/json"
             rows = [] if self.server.moved else [
@@ -566,6 +571,29 @@ def main():
         check("...and says why",
               logged(instance.output(), "INFO", re.escape("not in /api/v2/resources after rex-direct's provider "
                                                           "asked plex.tv; announced again")),
+              instance.output()[-3000:])
+
+        # 4d. ...but only when the list leaves rex out. A list read that fails -- a refused token's 401,
+        #     plex.tv down -- is the heartbeat's to report, not an announce and an ERROR per provider call.
+        refused = os.path.join(work, "provider-refused-token")
+        setup(refused, claimed=False)
+        with stub.lock:
+            stub.records = []
+            stub.queue = [(403, NOT_OWNED)]
+        stub.resources_status = 401
+        instance = Instance(refused, free_port(), stub.server_address[1], register_url,
+                            extra=("--announce-url", LAN), heartbeat=3600)
+        live.append(instance)
+        check("a claim whose token plex.tv refuses is answered", instance.claim() == 200)
+        wait_for(lambda: stub.taken("/api/rex-direct/register"), 10)
+        asked = wait_for(lambda: stub.taken("/plex.tv/api/v2/resources"), 15)
+        time.sleep(1)
+        check("...rex reads the list after its provider and, refused, announces nothing more",
+              asked and len(announced(stub)) == 1, (len(asked or []), announced(stub)))
+        stub.resources_status = None
+        instance.stop()
+        check("...and logs no announce or failure for it",
+              "announced again" not in instance.output() and "announcing again" not in instance.output(),
               instance.output()[-3000:])
 
         # 5. A 202 is a provider still issuing the certificate: an INFO, the port opens at
