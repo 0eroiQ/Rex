@@ -302,7 +302,11 @@ no account token: `PLEX_TOKEN` is not read since 2026-10-19. An unclaimed server
 nothing: plex.tv applies a device PUT to the device that owns the token, so the 2026-09-11
 spike's unclaimed announce with zurg's account token rewrote the account's "zurg" device row
 (findings, "Collateral change to the Plex account"). A claimed server answers another claim
-with 409.
+with 409, unless plex.tv refuses its server token: a 401 to a call made with it (never a 403, 5xx
+or network failure) marks the claim refused until a 2xx, shown only at rex's own `GET /rex/claim`
+(rex's networks, no token; never in `/identity`), and a new claim from those networks replaces it.
+rex never drops or re-exchanges a claim by itself, though a real PMS drops one plex.tv refuses
+(findings, "A claim whose device was removed").
 
 `rex.db`, `rex.env`, `run.sh` and `rex-direct.json` are gitignored: the catalog and
 `rex.env` carry account-scoped credentials, `rex-direct.json` a private key. `examples/catalog.example.json` keeps the shape.

@@ -15956,3 +15956,57 @@ original file: PMS converted nothing for any of them. rex runs the same server w
   Recently Added), By Genre's list in 41 ms, all 10,000 at once (RequestedCount 0) in 1.1 s. The
   listing reads its titles' hot fields and the search index's genres (`corpus.rs`), and only the
   page's rows (`Catalog::read_listed`).
+
+## A claim whose device was removed (2026-11-16)
+
+A patron's rex (zurg+rex Android, engine 2026.11.15) sat claimed and invisible to the Plex apps for
+over a day: every plex.tv call it made with the claim's server token was a 401 (pubsub a 403), it kept
+answering `/identity` with `claimed="1"`, and it answered a new claim 409. Measured on a lab account
+the same day, `tests/fixtures/plextv_device_removed_2026_11_16.json`:
+
+- **Removing the server's device on plex.tv** (`DELETE plex.tv/devices/<id>.xml`, what Authorized
+  Devices' Remove does) **kills its server token at once.** Asked 5 s later with that token: the
+  access-token list, the owner read (`/api/v2/user`), the webhooks and `/api/v2/resources` answer 401
+  `User could not be authenticated` (code 1001), the device PUT and `POST /servers.xml` 401 `Invalid
+  authentication token.`, and pubsub a bare nginx 403. **The features read (`/api/v2/features`) still
+  answers 200** with the token in the query, so a 2xx from it says nothing about the token. A rex
+  restarted on that claim logs the patron's lines exactly, in the same order.
+- **A second claim does not kill the first.** A second rex claimed to the same account left the
+  first's server token answering 200 on every one of those calls, and the account's own sign-in
+  token too. Which of the other candidates the patron hit (a device removed by hand, a sign-out of
+  every device or a password change) is not known; only the first was measured.
+- **A real PMS drops a refused claim.** plexlab's PMS (1.43.4), claimed to the lab account and its
+  device removed, went on answering `claimed="1"` and `signInState="ok"` for the 30 s watched; once
+  restarted, its first access-token read was a 401, it logged `MyPlex: Token was invalid, resetting
+  security.`, emptied `PlexOnlineToken` and answered `/identity` `claimed="0"` and `/myplex/account`
+  `signInState="invalid"`, `mappingError="badauth"`. Whether a running PMS does the same on its own
+  schedule was not measured.
+
+What rex does, which is **not** what that PMS does, by decision: rex keeps the claim (the token
+gate, `claim_state.json`, `claimed="1"`) and never drops or exchanges one on its own, since a claim
+redeemed again is what reset the account's tokens on 2026-09-11. It records the refusal instead
+(`plextv::verdict`): a 401 to a call made with the claim's current token -- the access-token read,
+the owner read, the webhooks, the resources check, the device PUT, `servers.xml` -- marks the claim
+refused, logged once as a WARNING; a 2xx from one of them clears it (an INFO). A 403, a 5xx and a
+network failure leave it as it is, as do pubsub (403 here), the features read (200 here) and
+rex-direct, whose 401 is its provider's (a wrong `REX_DIRECT_KEY` is one too) and which was off in
+the measurement. The refusal is kept in memory only: a restart finds it again on its first calls.
+
+It is shown at `GET /rex/claim`, rex's own and answered only to rex's own networks with no token
+(the gate `POST /myplex/claim` keeps unclaimed): `{"claimed": bool, "refused": bool,
+"refused_since": <unix seconds> | null, "owner": <username> | null}`. Nothing is added to
+`/identity` or `/myplex/account`, which Plex clients parse. A refused claim takes a new
+`POST /myplex/claim?token=` from those networks with no token, through the same exchange as a
+first claim: on success `claim_state.json` holds the new claim alone (no features, cursor or
+access tokens of the old one), the old list stops letting its account in, the new one is read, and
+`servers.xml`, the device PUT and the owner refresh run at once; the refused claim's pubsub loop,
+heartbeat and rex-direct pick up the new token on their next turn. A working claim still answers
+another claim 409 (401 with no token, from the gate, as before). `tests/test_plextv.py`,
+`refused_claim`.
+
+Run live the same day on the lab rex whose device was removed: `GET /rex/claim` answered
+`"refused": true` from the first second, a new claim token POSTed with no token from the LAN was
+exchanged, and the new token's next calls answered 200 (access tokens, owner, webhooks, resources,
+device PUT; `servers.xml` its usual 422) and plex.tv listed the server again. **The access-token
+read made a second after the exchange answered 403** and the same call 200 a minute later: a fresh
+server token is not yet everywhere on plex.tv, one more reason a 403 marks nothing.

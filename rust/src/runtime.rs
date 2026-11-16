@@ -8742,14 +8742,16 @@ impl Runtime {
                 match query.get("token").filter(|token| !token.is_empty()) {
                     None => Response::error(400, "rex: missing claim token"),
                     // rex's own refusal: repeated exchanges are what reset the account's
-                    // tokens on 2026-09-11. Re-claiming means removing claim_state.json first.
+                    // tokens on 2026-09-11. A claim plex.tv refuses the token of (its device
+                    // removed, 2026-11-16) is the exception: a new claim replaces it.
                     Some(_)
                         if self
                             .plextv
                             .claim
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .claimed() =>
+                            .claimed()
+                            && !self.claim_refused() =>
                     {
                         Response::error(409, "rex: already claimed")
                     }
@@ -8765,6 +8767,7 @@ impl Runtime {
                 }
             }
             ("PATCH", "/myplex/claim") => Response::plain(500, b"500".to_vec()),
+            ("GET" | "HEAD", "/rex/claim") => self.route_rex_claim(),
             ("PUT", "/myplex/refreshReachability") => Response::empty(200),
             // server.py checks no verb on these four routes.
             (_, "/myplex/account") => self.myplex_account(),
@@ -9111,6 +9114,11 @@ impl Runtime {
             ) && matches!(request.method.as_str(), "GET" | "HEAD"))
         {
             return true;
+        }
+        // rex's own claim state, and a new claim for one plex.tv refuses the token of: what an
+        // app on rex's own networks asks with no token, since the refused claim's lists none.
+        if path == "/rex/claim" || (path == "/myplex/claim" && self.claim_refused()) {
+            return self.local_request(request);
         }
         // An unclaimed server serves no client, only its claim (2026-10-19): with no claim it
         // has no token to ask Plex's agent with, so nothing it could show would have a name.

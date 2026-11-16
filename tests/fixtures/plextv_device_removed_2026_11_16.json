@@ -1,0 +1,80 @@
+{
+ "provenance": "2026-11-16, a scratch rex (2026.11.14 nightly) on zen claimed to a lab Plex account, its server device then removed with DELETE plex.tv/devices/<id>.xml (what Authorized Devices' Remove does). Each call rex makes with the claim's server token, asked once more with that token 5 s later, with a real PMS's headers. Bodies as plex.tv answered them; the features answer is clipped. The token is the only secret and appears in no body.",
+ "machine": "{machine}",
+ "calls": [
+  {
+   "host": "plex.tv",
+   "method": "GET",
+   "path": "/api/v2/server/access_tokens",
+   "status": 401,
+   "content_type": null,
+   "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<errors>\n  <error code=\"1001\" message=\"User could not be authenticated\" status=\"401\"/>\n</errors>\n"
+  },
+  {
+   "host": "servers.plex.tv",
+   "method": "GET",
+   "path": "/api/v2/user",
+   "status": 401,
+   "content_type": "application/xml; charset=utf-8",
+   "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<errors>\n  <error code=\"1001\" message=\"User could not be authenticated\" status=\"401\"/>\n</errors>\n"
+  },
+  {
+   "host": "servers.plex.tv",
+   "method": "GET",
+   "path": "/api/v2/features",
+   "status": 200,
+   "content_type": "application/xml; charset=utf-8",
+   "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<features>\n  <feature id=\"guided-upgrade\" uuid=\"c9d9b7ee-fdd9-474e-b143-5039c04e9b9b\"/>\n  <feature id=\"increase-password-complexity\" uuid=\"9e93f8a8-7ccd-4d15-99fa-76a158027660\"/>\n  <feature id=\"upgrade-3ds2\" uuid=\"547514ab-3284-46e5-af77-bbaff247e3fc\"/>\n  <feat",
+   "body_clipped_at": 300
+  },
+  {
+   "host": "plex.tv",
+   "method": "GET",
+   "path": "/api/v2/server/webhooks",
+   "status": 401,
+   "content_type": null,
+   "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<errors>\n  <error code=\"1001\" message=\"User could not be authenticated\" status=\"401\"/>\n</errors>\n"
+  },
+  {
+   "host": "plex.tv",
+   "method": "GET",
+   "path": "/api/v2/resources",
+   "status": 401,
+   "content_type": null,
+   "body": "{\"errors\":[{\"code\":1001,\"message\":\"User could not be authenticated\",\"status\":401}]}"
+  },
+  {
+   "host": "servers.plex.tv",
+   "method": "PUT",
+   "path": "/devices/{machine}",
+   "status": 401,
+   "content_type": "application/xml; charset=utf-8",
+   "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<errors>\n  <error>Invalid authentication token.</error>\n</errors>\n"
+  },
+  {
+   "host": "plex.tv",
+   "method": "POST",
+   "path": "/servers.xml",
+   "status": 401,
+   "content_type": null,
+   "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<errors>\n  <error>Invalid authentication token.</error>\n</errors>\n"
+  },
+  {
+   "host": "pubsub.plex.tv",
+   "method": "GET",
+   "path": "/sub/eventsource/{account}/{machine}",
+   "status": 403,
+   "content_type": "text/html",
+   "body": "<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
+  }
+ ],
+ "rex_log_after_restart": [
+  "claim state: CLAIMED by <owner>",
+  "token gate: ENFORCED -- claimed: the server's own token and the ones plex.tv lists for it",
+  "claimed-account refresh failed (1 in a row): HTTP Error 401: Unauthorized",
+  "heartbeat failed (1 in a row): HTTP Error 401: Unauthorized",
+  "access tokens read failed: HTTP Error 401: Unauthorized",
+  "servers.xml POST -> 401",
+  "pubsub failed: HTTP Error 403: Forbidden; resubscribing in 15s"
+ ]
+}

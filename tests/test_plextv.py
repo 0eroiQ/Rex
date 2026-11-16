@@ -109,6 +109,15 @@ with open(os.path.join(HERE, "fixtures", "plexmeta_matches_s143.json")) as _hand
 with open(os.path.join(HERE, "fixtures", "provider", "matches.json")) as _handle:
     METADATA_ANSWERS = json.load(_handle)
 CLAIM_TOKEN = "claim-STUB-CLAIM-TOKEN"
+# A second claim, of another account, made once plex.tv refuses the first claim's token.
+NEW_CLAIM_TOKEN = "claim-STUB-RECLAIM"
+NEW_SERVER_TOKEN = "SERVER-TOKEN-STUB-NEW"
+NEW_ACCOUNT_TOKEN = "ACCOUNT-TOKEN-STUB-NEW"
+NEW_OWNER, NEW_ACCOUNT_ID = "newowner", 43
+# What plex.tv answered a claim's server token once the server's device was removed on plex.tv
+# (2026-11-16, a lab account): 401 to every call but the features read, pubsub a 403.
+with open(os.path.join(HERE, "fixtures", "plextv_device_removed_2026_11_16.json")) as _handle:
+    REMOVED = json.load(_handle)
 REUSED_CLAIM_TOKEN = "claim-STUB-REUSED"    # plex.tv answers it with the ACCOUNT token
 ACCOUNT_TOKEN = "ACCOUNT-TOKEN-STUB"
 SERVER_TOKEN = "SERVER-TOKEN-STUB"
@@ -351,6 +360,10 @@ class Stub(ThreadingHTTPServer):
         self.release_list = DOWNLOADS
         # Seconds the claim exchange takes: two claims sent at once must not both reach it.
         self.exchange_delay = 0
+        # Server tokens plex.tv refuses, answered as REMOVED recorded; and a status answered
+        # instead of REMOVED's 401s and 403 for SERVER_TOKEN, when one is set.
+        self.refused = set()
+        self.fail_status = None
 
     def handle_error(self, request, client_address):
         # A stopped rex hangs up on its pubsub stream. socketserver printed the
@@ -395,6 +408,15 @@ class StubHandler(BaseHTTPRequestHandler):
         if (record["method"], record["host"], record["path"]) == \
                 ("PUT", "plex.tv", "/api/servers/%s/connectivity" % MACHINE):
             self.server.pubsub_connectivity_seen.set()
+        refusal = self.refusal(record)
+        if refusal is not None:
+            status, kind, payload = refusal
+            self.send_response(status)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if (self.command, host) == ("GET", "pubsub.plex.tv"):
             return self.pubsub(path)
         status, kind, payload = self.answer(record)
@@ -410,11 +432,26 @@ class StubHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def refusal(self, record):
+        """REMOVED's answer to a call made with a token plex.tv refuses, or `fail_status` in
+        place of its 401s and 403 for the server token."""
+        query = dict(record["query"])
+        token = query.get("X-Plex-Token") or query.get("auth_token") or dict(record["headers"]).get("x-plex-token")
+        refused = token in self.server.refused
+        if not refused and not (self.server.fail_status and token == SERVER_TOKEN):
+            return None
+        for row in REMOVED["calls"]:
+            path = re.escape(row["path"]).replace(re.escape("{machine}"), MACHINE).replace(re.escape("{account}"), r"\d+")
+            if (row["host"], row["method"]) == (record["host"], record["method"]) and re.fullmatch(path, record["path"]):
+                status = row["status"] if refused or row["status"] < 400 else self.server.fail_status
+                return status, row["content_type"] or "text/plain", row["body"].encode("utf-8")
+        return None
+
     def pubsub(self, path):
         """The recorded event stream: plex.tv's comment, then -- once the server has asked
         for a reachability check -- its notifyConnectivity verdict under that request's
         asyncIdentifier, then a keepalive, until the stub ends it (the server resubscribes)."""
-        if path != "/sub/eventsource/%d/%s" % (ACCOUNT_ID, MACHINE):
+        if path not in ["/sub/eventsource/%d/%s" % (account, MACHINE) for account in (ACCOUNT_ID, NEW_ACCOUNT_ID)]:
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -457,6 +494,10 @@ class StubHandler(BaseHTTPRequestHandler):
             return 200, "application/json", '{"MediaContainer":{"Metadata":[]}}'
         if (method, host, path) == ("POST", "plex.tv", "/api/claim/exchange"):
             time.sleep(self.server.exchange_delay)
+            if query.get("token") == NEW_CLAIM_TOKEN:
+                return 200, xml, ('<?xml version="1.0" encoding="UTF-8"?>\n<user id="%d" '
+                                  'username="%s" email="new@stub.invalid" authToken="%s"/>\n'
+                                  % (NEW_ACCOUNT_ID, NEW_OWNER, NEW_SERVER_TOKEN))
             if query.get("token") == REUSED_CLAIM_TOKEN:
                 return 200, xml, ('<?xml version="1.0" encoding="UTF-8"?>\n<user id="%d" '
                                   'username="%s" email="%s" authToken="%s"/>\n'
@@ -473,6 +514,10 @@ class StubHandler(BaseHTTPRequestHandler):
             # token the test has started listing; anything but the server token is a 401.
             if self.server.refuse_access:
                 return 503, "text/plain", "stub: plex.tv is down"
+            if query.get("auth_token") == NEW_SERVER_TOKEN:
+                row = '<token type="device" device="stub" token="%s" owned="1" createdAt="2026-11-16 00:00:00 UTC"/>\n'
+                return 200, xml, '<?xml version="1.0" encoding="UTF-8"?>\n<tokens>\n%s</tokens>\n' % "".join(
+                    row % t for t in (NEW_SERVER_TOKEN, NEW_ACCOUNT_TOKEN))
             if query.get("auth_token") != SERVER_TOKEN:
                 return ACCESS["bad_auth_answer"]["status"], xml, ACCESS["bad_auth_answer"]["body"]
             body = ACCESS["response"]["body"].replace("SERVER-TOKEN", SERVER_TOKEN) \
@@ -1217,6 +1262,181 @@ def catalog_metadata_identity():
         stub.shutdown()
 
 
+def refused_claim():
+    """plex.tv refusing the claim's server token, as it did once the server's device was removed
+    on plex.tv (`fixtures/plextv_device_removed_2026_11_16.json`; a patron's rex sat claimed and
+    invisible for a day on the same 401s): rex says so at its own GET /rex/claim, on a 401 alone
+    and never in /identity, clears it on the next 2xx, and takes a new claim, made from its own
+    networks with no token, in place of the refused one. A working claim still answers 409."""
+    stub = Stub(free_port())
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    stub_port = stub.server_address[1]
+    directories = []
+    refused_line = re.compile(r"^\d\d:\d\d:\d\d WARNING plex\.tv refused the claim's server token \(401\)", re.M)
+    accepted_line = re.compile(r"^\d\d:\d\d:\d\d INFO    plex\.tv accepts the claim's server token again$", re.M)
+
+    def fresh(claimed=True):
+        directory = tempfile.mkdtemp(prefix="rex-plextv-refused-")
+        directories.append(directory)
+        shutil.copy(CATALOG, os.path.join(directory, "catalog.json"))
+        if claimed:
+            with open(os.path.join(directory, "claim_state.json"), "w") as handle:
+                json.dump({"machine": MACHINE, "token": SERVER_TOKEN, "owner": OWNER, "email": EMAIL,
+                           "feature_uuids": FEATURE_UUIDS, "account_id": ACCOUNT_ID, "view_state_cursor": None,
+                           "access_tokens": sorted([ACCOUNT_TOKEN, SERVER_TOKEN])}, handle)
+        return directory
+
+    def ask(instance, method, path, host=None, token=None, accept="application/json"):
+        headers = {"Accept": accept, "X-Plex-Client-Identifier": "plextv-suite"}
+        if host:
+            headers["Host"] = host
+        if token:
+            headers["X-Plex-Token"] = token
+        conn = http.client.HTTPConnection("127.0.0.1", instance.port, timeout=15)
+        try:
+            conn.request(method, path, headers=headers)
+            response = conn.getresponse()
+            body = response.read()
+        finally:
+            conn.close()
+        try:
+            return response.status, json.loads(body) if body else None
+        except ValueError:
+            return response.status, body.decode(errors="replace")
+
+    def claim_state(instance):
+        return ask(instance, "GET", "/rex/claim")
+
+    def claim_body(instance):
+        body = claim_state(instance)[1]
+        return body if isinstance(body, dict) else {}
+
+    def refused_beats(token=SERVER_TOKEN):
+        return [r for r in stub.taken("servers.plex.tv", "/devices/%s" % MACHINE, "PUT")
+                if dict(r["query"]).get("X-Plex-Token") == token]
+
+    def subscriptions(token, since):
+        return [r for r in stub.taken("pubsub.plex.tv", None, "GET")
+                if dict(r["query"]).get("X-Plex-Token") == token and r["at"] >= since]
+
+    try:
+        # -- unclaimed: nothing to refuse ---------------------------------------------
+        unclaimed = Instance(fresh(False), free_port(), stub_port, plex_token=None)
+        check("unclaimed: GET /rex/claim answers no claim, from rex's own networks with no token",
+              claim_state(unclaimed) == (200, {"claimed": False, "refused": False, "refused_since": None, "owner": None}),
+              claim_state(unclaimed))
+        check("and as that JSON to a client that asks for any type (curl's */*), not as Plex XML",
+              ask(unclaimed, "GET", "/rex/claim", accept="*/*")
+              == (200, {"claimed": False, "refused": False, "refused_since": None, "owner": None}),
+              ask(unclaimed, "GET", "/rex/claim", accept="*/*"))
+        unclaimed.stop()
+
+        # -- the device removed: every call with the server token a 401 ------------------
+        stub.clear()
+        stub.refused = {SERVER_TOKEN}
+        started = time.time()
+        refused = Instance(fresh(), free_port(), stub_port, plex_token=None)
+        wait_for(lambda: len(refused_beats()) >= 3, 15)
+        status, body = claim_state(refused)
+        check("a 401 to the claim's server token: GET /rex/claim says the claim is refused, since when, and whose",
+              status == 200 and isinstance(body, dict) and sorted(body) == ["claimed", "owner", "refused", "refused_since"]
+              and body["claimed"] is True and body["refused"] is True and body["owner"] == OWNER
+              and isinstance(body.get("refused_since"), int) and started - 5 <= body["refused_since"] <= time.time() + 1,
+              (status, body, refused.output()[-1500:]))
+        check("it is said once, as a WARNING, however many calls plex.tv refuses",
+              len(refused_beats()) >= 3 and len(refused_line.findall(refused.output())) == 1,
+              (len(refused_beats()), refused_line.findall(refused.output())))
+        status, body = refused.request("GET", "/identity")
+        identity = container(body)
+        check("/identity keeps a claimed PMS's shape: claimed, and nothing of rex's own",
+              status == 200 and truthy(identity.get("claimed")) and not any("refus" in key.lower() for key in identity),
+              (status, identity))
+        check("GET /rex/claim from a Host that is not rex's address is refused",
+              ask(refused, "GET", "/rex/claim", host="rex.stub.invalid")[0] == 401,
+              ask(refused, "GET", "/rex/claim", host="rex.stub.invalid"))
+        check("so is a new claim",
+              ask(refused, "POST", "/myplex/claim?token=%s" % NEW_CLAIM_TOKEN, host="rex.stub.invalid")[0] == 401
+              and not stub.taken("plex.tv", "/api/claim/exchange", "POST"),
+              stub.taken("plex.tv", "/api/claim/exchange", "POST"))
+        check("the refused claim's last list still lets its account in",
+              refused.request("GET", "/library/sections", token=ACCOUNT_TOKEN)[0] == 200)
+
+        # -- a new claim replaces the refused one ----------------------------------------
+        stub.user_id = NEW_ACCOUNT_ID
+        reclaimed_at = precise_time()
+        status, _ = ask(refused, "POST", "/myplex/claim?token=%s" % NEW_CLAIM_TOKEN)
+        check("a new claim, with no token from rex's own networks, replaces the refused one",
+              status == 200 and [dict(r["query"]).get("token") for r in stub.taken("plex.tv", "/api/claim/exchange", "POST")]
+              == [NEW_CLAIM_TOKEN], (status, refused.output()[-1500:]))
+        def replaced():
+            state = read_json(os.path.join(directories[-1], "claim_state.json"))
+            return state if state.get("token") == NEW_SERVER_TOKEN \
+                and NEW_ACCOUNT_TOKEN in state.get("access_tokens", []) else None
+        kept = wait_for(replaced, 10)
+        check("claim_state.json holds the new claim and its list, none of the refused one's account",
+              kept and kept["owner"] == NEW_OWNER and kept["account_id"] == NEW_ACCOUNT_ID
+              and ACCOUNT_TOKEN not in kept["access_tokens"],
+              kept or read_json(os.path.join(directories[-1], "claim_state.json")))
+        check("GET /rex/claim: claimed by the new owner, not refused",
+              claim_state(refused) == (200, {"claimed": True, "refused": False, "refused_since": None, "owner": NEW_OWNER}),
+              claim_state(refused))
+        check("the new token announces at once",
+              wait_for(lambda: refused_beats(NEW_SERVER_TOKEN), 5), refused.output()[-1500:])
+        check("the refused claim's account is no longer let in; the new one's is",
+              refused.request("GET", "/library/sections", token=ACCOUNT_TOKEN)[0] == 401
+              and refused.request("GET", "/library/sections", token=NEW_ACCOUNT_TOKEN)[0] == 200)
+        check("the claimed status holds: no second 'refused' line, no 'accepts again' for the new token",
+              len(refused_line.findall(refused.output())) == 1 and not accepted_line.findall(refused.output()),
+              refused.output()[-1500:])
+        first = wait_for(lambda: subscriptions(NEW_SERVER_TOKEN, reclaimed_at), 17)
+        time.sleep(max(0.0, reclaimed_at + 17 - precise_time()))
+        check("one pubsub stream: the refused claim's loop resubscribes with the new token, none is added",
+              first and len(subscriptions(NEW_SERVER_TOKEN, reclaimed_at)) == 1,
+              len(subscriptions(NEW_SERVER_TOKEN, reclaimed_at)))
+        check("a working claim still answers another claim 409",
+              ask(refused, "POST", "/myplex/claim?token=%s" % CLAIM_TOKEN, token=NEW_SERVER_TOKEN)[0] == 409)
+        check("and, with no token, the gate's 401 as before",
+              ask(refused, "POST", "/myplex/claim?token=%s" % CLAIM_TOKEN)[0] == 401)
+        refused.stop()
+
+        # -- a 403 or a 5xx says nothing about the token; a 2xx clears a 401 --------------
+        stub.clear()
+        stub.refused = set()
+        stub.fail_status = 403
+        failing = Instance(fresh(), free_port(), stub_port, plex_token=None)
+        wait_for(lambda: len(refused_beats()) >= 3, 15)
+        check("403s to the claim's server token do not make it refused",
+              len(refused_beats()) >= 3 and claim_body(failing).get("refused") is False,
+              claim_state(failing))
+        stub.fail_status = 503
+        mark = len(refused_beats())
+        wait_for(lambda: len(refused_beats()) >= mark + 3, 15)
+        check("nor do 503s",
+              len(refused_beats()) >= mark + 3 and claim_body(failing).get("refused") is False
+              and not refused_line.findall(failing.output()), claim_state(failing))
+        stub.fail_status = None
+        stub.refused = {SERVER_TOKEN}
+        check("a 401 then does",
+              wait_for(lambda: claim_body(failing).get("refused"), 10), failing.output()[-1500:])
+        stub.refused = set()
+        check("and the next call plex.tv answers clears it",
+              wait_for(lambda: claim_body(failing) == {"claimed": True, "refused": False, "refused_since": None,
+                                                           "owner": OWNER}, 10),
+              claim_state(failing))
+        check("said once, as an INFO",
+              len(accepted_line.findall(failing.output())) == 1, failing.output()[-1500:])
+        failing.stop()
+    finally:
+        for instance in LIVE:
+            if instance.proc.poll() is None:
+                instance.proc.kill()
+                instance.proc.wait()
+        stub.shutdown()
+        stub.server_close()
+        for directory in directories:
+            shutil.rmtree(directory, ignore_errors=True)
+
+
 def main():
     base = os.environ.get("REX_TEST_PORT")
     ports = [int(base) + offset for offset in range(3)] if base else \
@@ -1882,6 +2102,7 @@ def main():
         shutil.rmtree(directory, ignore_errors=True)
 
     placeholder_identity()
+    refused_claim()
     server_token_setup()
     version_identity()
     catalog_metadata_identity()
