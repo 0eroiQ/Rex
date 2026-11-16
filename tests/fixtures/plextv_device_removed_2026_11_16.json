@@ -1,5 +1,5 @@
 {
- "provenance": "2026-11-16, a scratch rex (2026.11.14 nightly) on zen claimed to a lab Plex account, its server device then removed with DELETE plex.tv/devices/<id>.xml (what Authorized Devices' Remove does). Each call rex makes with the claim's server token, asked once more with that token 5 s later, with a real PMS's headers. Bodies as plex.tv answered them; the features answer is clipped. The token is the only secret and appears in no body.",
+ "provenance": "2026-11-16, a scratch rex (2026.11.14 nightly) on zen claimed to a lab Plex account, its server device then removed with DELETE plex.tv/devices/<id>.xml (the API call; the Authorized Devices page's Remove was not clicked). Each call rex makes with the claim's server token, asked once more with that token 5 s later, with a real PMS's headers. Bodies as plex.tv answered them; the features answer is clipped. The token is the only secret and appears in no body.",
  "machine": "{machine}",
  "calls": [
   {

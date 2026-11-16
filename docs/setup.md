@@ -214,7 +214,7 @@ the account rex is claimed with: rex refuses it (403) to the accounts it is shar
 real Plex Media Server does.
 
 A claimed rex refuses another claim (409), unless plex.tv no longer accepts its claim: removing
-the server under Authorized Devices does that, and rex then logs `plex.tv refused the claim's
+the server under Authorized Devices should do that, and rex then logs `plex.tv refused the claim's
 server token` and `curl -s http://<rex's LAN IP>:32400/rex/claim` says `"refused": true`. Claim it
 again as above, no restart: the new claim replaces the refused one. To move it to another account (the fresh one was
 lost or banned), stop it, remove `claim_state.json`, start it, claim again and share again. If

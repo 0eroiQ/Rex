@@ -15964,8 +15964,8 @@ over a day: every plex.tv call it made with the claim's server token was a 401 (
 answering `/identity` with `claimed="1"`, and it answered a new claim 409. Measured on a lab account
 the same day, `tests/fixtures/plextv_device_removed_2026_11_16.json`:
 
-- **Removing the server's device on plex.tv** (`DELETE plex.tv/devices/<id>.xml`, what Authorized
-  Devices' Remove does) **kills its server token at once.** Asked 5 s later with that token: the
+- **Removing the server's device on plex.tv** (`DELETE plex.tv/devices/<id>.xml`, the API call; that
+  Authorized Devices' Remove button does the same is inferred, not clicked) **kills its server token at once.** Asked 5 s later with that token: the
   access-token list, the owner read (`/api/v2/user`), the webhooks and `/api/v2/resources` answer 401
   `User could not be authenticated` (code 1001), the device PUT and `POST /servers.xml` 401 `Invalid
   authentication token.`, and pubsub a bare nginx 403. **The features read (`/api/v2/features`) still
