@@ -16041,6 +16041,26 @@ notice came on every removal measured. Not measured: whether Authorized Devices'
 of all devices or a password change send the notice, and rex-direct's provider live (off throughout;
 `tests/test_rex_direct.py` drives it against a stub). `tests/test_plextv.py`, `refused_claim`.
 
+**Signing out of all devices** (measured later the same day on zen, lab account, twice). Plex Web has
+no button of that name: it is the account page's password change with "Sign out connected devices
+after password change" checked (`resetDevices`, also offered when two-factor is turned on), which
+saves as `PUT clients.plex.tv/api/v2/user?includeSubscriptions=1&includeProviders=1&...` with
+`password`, `passwordConfirmation`, `currentPassword` and `resetDevices: true`. plex.tv took the
+unchanged password and answered 204 when the request named itself Plex Web, and 403 code 1068 "This
+action is not available for this device." under another `X-Plex-Product`. The servers' tokens and the
+caller's own answered 401 afterwards (the page says it signs out "all claimed servers and client
+applications"; the other devices' tokens were not read), while all 43 device rows stayed, so a
+signed-out server is not missing from Authorized Devices. Its open pubsub stream stayed open and got
+`notifyResetToken` 2.05 s and 2.30 s after the PUT began, then `notifyAccountChange` 0.07 s later
+(`pubsub_after_sign_out_everywhere`, the raw lines read on a second server's stream), and the server
+token's access-token read answered 401 from 2.28 s and 2.58 s. Nothing else came: rex 88ffee06, its
+heartbeat an hour away, still said `"refused": false` 66 s on and would have waited for its next beat
+(up to 10 min). So `notifyResetToken` now has the access-token read asked as `notifyFavoritesChange`
+does, 5 s on: the second run marked the claim 7.7 s after the PUT and `GET /rex/claim` said refused
+8.6 s after it. On the lab account that is, by plex.tv's own description, the Pixel 6's Plex for Android, Plezy
+and zurg+rex apps and the servers on it, plexav on kids, every Plex Web session and Plexamp.
+Not measured: whether a real password change or two-factor's option sends the same notice.
+
 ## The provider's address, taken for the server's (2026-11-16)
 
 On the Fire TV Cube (zurg app sign-in, rex ae2d690c, DMM's rex-direct provider) a first claim was
