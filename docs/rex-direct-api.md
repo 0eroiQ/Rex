@@ -84,6 +84,13 @@ the account, including rows that are not servers (`provides` `controller`), so m
 three fields; a bad token is 401. Point the name at the request's source address (DMM's
 provider writes an IPv4 A record).
 
+plex.tv takes the address this check comes from for the server's own (`publicAddress`), whatever
+`X-Plex-Client-Identifier` says, and leaves the server out of `/api/v2/resources` until rex
+announces again (findings, "The provider's address, taken for the server's", 2026-11-16). rex
+looks for itself 10, 30 and 70 s after each registration and announces again when it is missing,
+so a provider needs to do nothing about it, but each call it makes to plex.tv with the token can
+hide the server for those seconds.
+
 `lanIp` is the caller's word alone: nothing can check it, and a record holding it points a
 public name wherever the caller says. Accept it only when it is RFC 1918 IPv4, so the worst a
 caller can do is name an address on a private network; refuse anything else (DMM answers 400
@@ -155,8 +162,8 @@ port no longer than the request took.
 
 A WARN with the status and the reason, `rex-direct: registration failed: HTTP 401 (the token
 does not own this server); retrying in 10 min`, and rex runs on with what it has. A 403 is
-DMM's answer when plex.tv does not list the server as the account's, which it also is for the
-first minutes after a claim (`HTTP 403 (The Plex account does not own this server); retrying in
+DMM's answer when plex.tv does not list the server as the account's, which it always is for a
+first claim's own registration, sent before rex's first announce (`HTTP 403 (The Plex account does not own this server); retrying in
 1 min`, ten times, then every 10 min). An
 unreachable provider and a 200 that is not the answer above are the same: never fatal.
 

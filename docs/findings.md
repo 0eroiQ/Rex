@@ -16040,3 +16040,58 @@ token working had it asked once, 200, nothing marked. No check on a timer was ad
 notice came on every removal measured. Not measured: whether Authorized Devices' Remove, signing out
 of all devices or a password change send the notice, and rex-direct's provider live (off throughout;
 `tests/test_rex_direct.py` drives it against a stub). `tests/test_plextv.py`, `refused_claim`.
+
+## The provider's address, taken for the server's (2026-11-16)
+
+On the Fire TV Cube (zurg app sign-in, rex ae2d690c, DMM's rex-direct provider) a first claim was
+listed by plex.tv's `/api/v2/resources` only 3 to 3.5 min after it, though rex's log ran as on any
+claim: the provider's 403 0.5 s after the exchange, `servers.xml` at 1.0 s, pubsub at 1.5 s, no
+failed announce. 55 s in, its device row already held its LAN connection but
+`publicAddress="128.140.121.142"`: dmm-01, the host DMM's provider runs on, not the home line, and
+`lastSeenAt` was the second of the provider's call. It was listed between +184 s and +211 s, and
+rex's first heartbeat beat (600 s from its start at 10:11:56) fell at +195 s.
+
+Measured on zen the same day with the lab account (`tests/fixtures/plextv_provider_address_2026_11_16.json`),
+scratch rex 841e7bc6, a 3600 s heartbeat so no beat fell in the window, the provider a stand-in on
+dmm-01 making DMM's `plexServerOwner` calls header for header:
+
+| Claim | Runs | First listed |
+|---|---|---|
+| rex-direct off | 3 | 5.1 to 5.3 s |
+| re-claim after its device was removed, off | 1 | 5.1 s |
+| DMM's real provider, from zen's own line | 1 | 5.2 s |
+| a real PMS (pms-docker 1.43.5, new config) | 1 | 2.5 s (the first poll) |
+| provider on dmm-01, its write applied before rex's announce | 11 | 5.3 to 8.7 s |
+| provider on dmm-01, its write applied after rex's announce | 3 | not in 240 s, 900 s, 900 s |
+
+- **A request made with the server's token is the server's to plex.tv, from wherever it comes.** The
+  provider's `GET /api/v2/resources` from dmm-01 set the server's `publicAddress` to dmm-01's, with the
+  server's machineIdentifier as `X-Plex-Client-Identifier` and equally with the provider's own (6 of 6
+  runs; with none plex.tv answers 400 `X-Plex-Client-Identifier is missing`). No device row was made
+  for the provider's identifier.
+- **A server whose `publicAddress` is not its own is left out of `/api/v2/resources`**, presence true,
+  connection and all. The next device PUT from the server puts the address back and lists it within
+  the second (one announce-shaped PUT, 200). Without one it stays out: three runs held out until they
+  were stopped, the Cube until its heartbeat.
+- **On a first claim it is a race.** rex asks its provider before its `servers.xml` and device PUT
+  (`finish_claim`), so the provider's call comes first, but plex.tv applies its write when it does:
+  in 11 runs before the announce, which then wins, in 3 after it, seen 5.4 to 7.8 s after the claim.
+- **Any call does it, not only the first.** A listed server asked once from dmm-01 ~15 s after its
+  claim was gone from the list within a second, 8 of 8 (`provider_after_announce`). Not every call
+  moved an old row: five calls to one listed 18 min had no effect, one to another listed 9 min did;
+  what decides that was not found. So DMM's minute retries and 6-hourly re-registration can hide a
+  running server until its next beat, up to 10 min; that was not measured on a live rex-direct.
+- A rex announcing no connection at all (bound to loopback) was not listed in 600 s.
+
+So rex looks for itself after each provider call (`plextv::settle_after_provider`): 10, 30 and 70 s
+after it, it reads `/api/v2/resources` as the heartbeat does, now matched on the machineIdentifier
+rather than the name (an account can hold several servers named alike), and announces again when
+missing, then stops. The provider is not changed: no header keeps its call off the server's row.
+`tests/test_rex_direct.py` leg 4c, the provider's write landing 7.8 s on as the latest measured did.
+
+Live on zen with the fix (88ffee06), the provider stand-in on dmm-01 answering its 403 at once and asking
+plex.tv 3 s later, so its write lands after the claim's announce every time: 841e7bc6 was listed at
+5.4 s, gone at 8.7 s and still gone at 100 s; the fix's server lost its address at 5.4 s, logged `not in
+/api/v2/resources after rex-direct's provider asked plex.tv; announced again` 11 s after the claim and
+was listed from 15.4 s to the end. Six more fixed claims through the plain stand-in were listed in 5.1
+to 5.5 s and never needed the second announce, the provider's minute retry included.
