@@ -312,8 +312,10 @@ or network failure) marks the claim refused until a 2xx, shown only at rex's own
 pubsub's `notifyFavoritesChange` (sent on a removed server's stream, which plex.tv keeps open),
 `notifyResetToken` (sent when the account signs out of all devices), a pubsub 403 and rex-direct's provider refusing the token mark nothing themselves: they have the access-token
 read asked, once a minute at most (`plextv::suspect`), so a removed device is marked in seconds, not
-at the 600 s heartbeat. rex never drops or re-exchanges a claim by itself, though a real PMS drops one plex.tv refuses
-(findings, "A claim whose device was removed").
+at the 600 s heartbeat. A running rex never drops or re-exchanges a claim; a start whose first call, the
+access-token read, plex.tv answers 401 drops it as a real PMS does (`plextv::drop_refused_claim`: machine and
+library kept, `/identity` `claimed="0"`, `/rex/claim` unclaimed, so the apps offer Sign in to Plex), and a 403,
+5xx or no answer at a start keeps it (Ben, 2026-11-16; findings, "A claim whose device was removed").
 
 `rex.db`, `rex.env`, `run.sh` and `rex-direct.json` are gitignored: the catalog and
 `rex.env` carry account-scoped credentials, `rex-direct.json` a private key. `examples/catalog.example.json` keeps the shape.

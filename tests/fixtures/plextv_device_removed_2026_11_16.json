@@ -150,5 +150,14 @@
     "rex": "with notifyResetToken asked: plex.tv asked 7.4 s on, refused 7.7 s on"
    }
   ]
+ },
+ "pms_restart": {
+  "provenance": "2026-11-16, plexlab's PMS (1.43.4) claimed to the lab account, its server device then removed on plex.tv (findings, \"A claim whose device was removed\"). Running, it went on answering claimed=\"1\" and signInState=\"ok\" for the 30 s watched; restarted, its first access-token read was a 401 and it logged `MyPlex: Token was invalid, resetting security.`, emptied PlexOnlineToken and answered as below.",
+  "log": "Token was invalid, resetting security",
+  "identity_claimed": "0",
+  "myplex_account": {
+   "signInState": "invalid",
+   "mappingError": "badauth"
+  }
  }
 }

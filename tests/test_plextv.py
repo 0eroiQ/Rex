@@ -1356,12 +1356,16 @@ def refused_claim():
               ask(unclaimed, "GET", "/rex/claim", accept="*/*"))
         unclaimed.stop()
 
-        # -- the device removed: every call with the server token a 401 ------------------
+        # -- the device removed while rex runs: every call with the server token a 401 -----
         stub.clear()
-        stub.refused = {SERVER_TOKEN}
+        stub.refused = set()
         started = time.time()
         refused = Instance(fresh(), free_port(), stub_port, plex_token=None)
-        wait_for(lambda: len(refused_beats()) >= 3, 15)
+        check("a healthy start keeps its claim",
+              wait_for(lambda: refused_beats(), 10) and claim_body(refused).get("claimed") is True, claim_state(refused))
+        stub.refused = {SERVER_TOKEN}
+        mark = len(refused_beats())
+        wait_for(lambda: len(refused_beats()) >= mark + 3, 15)
         status, body = claim_state(refused)
         check("a 401 to the claim's server token: GET /rex/claim says the claim is refused, since when, and whose",
               status == 200 and isinstance(body, dict) and sorted(body) == ["claimed", "owner", "refused", "refused_since"]
@@ -1369,7 +1373,7 @@ def refused_claim():
               and isinstance(body.get("refused_since"), int) and started - 5 <= body["refused_since"] <= time.time() + 1,
               (status, body, refused.output()[-1500:]))
         check("it is said once, as a WARNING, however many calls plex.tv refuses",
-              len(refused_beats()) >= 3 and len(refused_line.findall(refused.output())) == 1,
+              len(refused_beats()) >= mark + 3 and len(refused_line.findall(refused.output())) == 1,
               (len(refused_beats()), refused_line.findall(refused.output())))
         status, body = refused.request("GET", "/identity")
         identity = container(body)
@@ -1424,14 +1428,73 @@ def refused_claim():
               ask(refused, "POST", "/myplex/claim?token=%s" % CLAIM_TOKEN)[0] == 401)
         refused.stop()
 
+        # -- a start on a refused claim drops it, as plexlab's PMS did --------------------
+        # Restarted on a removed device's claim, its first access-token read a 401, the PMS logged
+        # "Token was invalid, resetting security" and answered unclaimed (REMOVED's pms_restart).
+        pms = REMOVED["pms_restart"]
+        stub.clear()
+        stub.refused = {SERVER_TOKEN}
+        stub.user_id = ACCOUNT_ID
+        dropping = Instance(fresh(), free_port(), stub_port, plex_token=None)
+        dropped = wait_for(lambda: claim_body(dropping).get("claimed") is False, 15)
+        check("a start whose access-token read plex.tv answers 401 drops the claim",
+              dropped and claim_body(dropping) == {"claimed": False, "refused": False, "refused_since": None, "owner": None},
+              (claim_state(dropping), dropping.output()[-1500:]))
+        status, body = dropping.request("GET", "/identity")
+        check("/identity answers unclaimed, as the PMS did (claimed=\"%s\")" % pms["identity_claimed"],
+              status == 200 and not truthy(container(body).get("claimed")) and not truthy(pms["identity_claimed"]),
+              (status, body))
+        kept = read_json(os.path.join(directories[-1], "claim_state.json"))
+        check("claim_state.json keeps the machine and drops the claim's account, token and lists",
+              kept.get("machine") == MACHINE and kept.get("token") is None and kept.get("owner") is None
+              and kept.get("account_id") is None and kept.get("access_tokens") == [], kept)
+        # The PMS's /myplex/account then said signInState "invalid"; an unclaimed rex answers that
+        # path 401 to everyone (its unclaimed gate), so there is nothing to mirror.
+        check("/myplex/account is refused as on any unclaimed rex",
+              ask(dropping, "GET", "/myplex/account")[0] == 401, ask(dropping, "GET", "/myplex/account"))
+        check("said once, in the PMS's words",
+              len(re.findall(r"^\d\d:\d\d:\d\d WARNING %s" % re.escape(pms["log"]), dropping.output(), re.M)) == 1,
+              dropping.output()[-1500:])
+        check("and the dropped claim registers nothing: no servers.xml, no pubsub",
+              not [r for r in stub.taken("plex.tv", "/servers.xml", "POST")
+                   if dict(r["query"]).get("auth_token") == SERVER_TOKEN] and not subscriptions(SERVER_TOKEN, 0),
+              dropping.output()[-1500:])
+        stub.refused = set()
+        stub.user_id = NEW_ACCOUNT_ID
+        check("a new claim from rex's own networks with no token is taken",
+              ask(dropping, "POST", "/myplex/claim?token=%s" % NEW_CLAIM_TOKEN)[0] == 200
+              and wait_for(lambda: claim_body(dropping).get("owner") == NEW_OWNER, 10)
+              and ((ask(dropping, "GET", "/myplex/account", token=NEW_SERVER_TOKEN)[1] or {}).get("MyPlex") or {}).get("signInState") == "ok",
+              (claim_state(dropping), dropping.output()[-1500:]))
+        dropping.stop()
+        stub.user_id = ACCOUNT_ID
+
+        # Without a 401 at the start the claim stays: a 503, or plex.tv not answering at all.
+        stub.clear()
+        stub.fail_status = 503
+        busy = Instance(fresh(), free_port(), stub_port, plex_token=None)
+        wait_for(lambda: len(refused_beats()) >= 2, 10)
+        check("a start whose reads plex.tv answers 503 keeps its claim",
+              len(refused_beats()) >= 2 and claim_body(busy).get("claimed") is True, claim_state(busy))
+        busy.stop()
+        stub.fail_status = None
+        offline = Instance(fresh(), free_port(), free_port(), plex_token=None)
+        time.sleep(4)
+        check("so does a start with plex.tv unreachable",
+              claim_body(offline).get("claimed") is True
+              and read_json(os.path.join(directories[-1], "claim_state.json")).get("token") == SERVER_TOKEN,
+              (claim_state(offline), offline.output()[-1500:]))
+        offline.stop()
+
         # -- a 403 or a 5xx says nothing about the token; a 2xx clears a 401 --------------
         stub.clear()
         stub.refused = set()
         stub.fail_status = 403
         failing = Instance(fresh(), free_port(), stub_port, plex_token=None)
         wait_for(lambda: len(refused_beats()) >= 3, 15)
-        check("403s to the claim's server token do not make it refused",
-              len(refused_beats()) >= 3 and claim_body(failing).get("refused") is False,
+        check("403s to the claim's server token, its start's included, neither refuse nor drop it",
+              len(refused_beats()) >= 3 and claim_body(failing).get("refused") is False
+              and claim_body(failing).get("claimed") is True,
               claim_state(failing))
         stub.fail_status = 503
         mark = len(refused_beats())

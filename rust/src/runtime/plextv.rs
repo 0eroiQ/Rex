@@ -1583,6 +1583,10 @@ pub(crate) fn start_registration(
             if let Some(access) = &access {
                 let mut read = access.read.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 access.refresh(&claim, None, &mut read);
+                drop(read);
+                if drop_refused_claim(&claim, access) {
+                    return;
+                }
             }
             register(&claim, &local_address, &sections, beat.as_ref());
             loop {
@@ -1595,6 +1599,38 @@ pub(crate) fn start_registration(
                 thread::sleep(Duration::from_secs(PUBSUB_RETRY));
             }
         });
+}
+
+/// A claimed start whose first call, the access-token read, plex.tv answered 401 (`verdict`) drops
+/// the claim, as plexlab's PMS did (findings, "A claim whose device was removed": restarted on a
+/// removed device's claim it logged "Token was invalid, resetting security" and answered
+/// `claimed="0"`). The machineIdentifier, version and library stay; the claim's account, token and
+/// lists go, so the apps offer Sign in to Plex. Its `/myplex/account` (`signInState="invalid"`,
+/// `mappingError="badauth"`) is not mirrored: an unclaimed rex answers that path 401 to everyone. A 403, a 5xx or no answer marks nothing and keeps
+/// it. A running server only marks a refusal (`verdict`); a start is the only place a claim drops.
+fn drop_refused_claim(claim: &SharedClaim, access: &Access) -> bool {
+    {
+        let mut state = claim.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.claimed() || state.refused_since.is_none() {
+            return false;
+        }
+        warning!(
+            "Token was invalid, resetting security: plex.tv refused the server token of the claim by {} (401), so rex is unclaimed again; claim it again (POST /myplex/claim?token=<code from https://www.plex.tv/claim>)",
+            state.owner.as_deref().unwrap_or("None")
+        );
+        state.token = None;
+        state.owner = None;
+        state.email = None;
+        state.account_id = None;
+        state.feature_uuids.clear();
+        state.view_state_cursor = None;
+        state.access_tokens.clear();
+        state.access_grants.clear();
+        state.refused_since = None;
+        state.save();
+    }
+    access.forget();
+    true
 }
 
 /// The SERVER record and, with a URL to announce, the device PUT.
