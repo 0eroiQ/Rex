@@ -13984,6 +13984,15 @@ verdicts, is `tests/fixtures/subtitles/sync_corpus.json.gz`.
   against keeps the best-named candidate unchecked, and the play queue's job measures the
   candidates against the audio and puts the kept stream right in place, same id and key
   (`test_subtitles.py`'s S05E08). Browsing reads no audio.
+- An item of several versions (two releases of one episode folded into one row): each is its own,
+  and only the playback decision says which is played (`mediaIndex`); the detail request and the
+  play queue carry none. So a decision starts the job for the version it plays, waited up to 3 s
+  as above, and rex keeps that version for the item; a play queue of such an item with none kept
+  leaves the job to the decision, and a search or apply with no `mediaItemID` is for the kept
+  version, else the first. A job, a miss and an unchecked pick are per version (its Part). Before
+  2026-11-15 every one went to the first version while the second played (Discord #rex-support,
+  2026-11-13; `test_subtitles.py`'s S05E10). Unmeasured: what a real PMS does with no
+  `mediaItemID` on such an item, and whether Plex for Apple TV sends one.
 
 **Measured against the corpus** (`subtitles.rs`' corpus test, rex's ranking and meter on the
 fixture's energy masks and cues; a pick is right when its truth is in sync and rex left it alone,
@@ -15947,3 +15956,179 @@ original file: PMS converted nothing for any of them. rex runs the same server w
   Recently Added), By Genre's list in 41 ms, all 10,000 at once (RequestedCount 0) in 1.1 s. The
   listing reads its titles' hot fields and the search index's genres (`corpus.rs`), and only the
   page's rows (`Catalog::read_listed`).
+
+## A claim whose device was removed (2026-11-16)
+
+A patron's rex (zurg+rex Android, engine 2026.11.15) sat claimed and invisible to the Plex apps for
+over a day: every plex.tv call it made with the claim's server token was a 401 (pubsub a 403), it kept
+answering `/identity` with `claimed="1"`, and it answered a new claim 409. Measured on a lab account
+the same day, `tests/fixtures/plextv_device_removed_2026_11_16.json`:
+
+- **Removing the server's device on plex.tv** (`DELETE plex.tv/devices/<id>.xml`, the API call; that
+  Authorized Devices' Remove button does the same is inferred, not clicked) **kills its server token at once.** Asked 5 s later with that token: the
+  access-token list, the owner read (`/api/v2/user`), the webhooks and `/api/v2/resources` answer 401
+  `User could not be authenticated` (code 1001), the device PUT and `POST /servers.xml` 401 `Invalid
+  authentication token.`, and pubsub a bare nginx 403. **The features read (`/api/v2/features`) still
+  answers 200** with the token in the query, so a 2xx from it says nothing about the token. A rex
+  restarted on that claim logs the patron's lines exactly, in the same order.
+- **A second claim does not kill the first.** A second rex claimed to the same account left the
+  first's server token answering 200 on every one of those calls, and the account's own sign-in
+  token too. Which of the other candidates the patron hit (a device removed by hand, a sign-out of
+  every device or a password change) is not known; only the first was measured.
+- **A real PMS drops a refused claim.** plexlab's PMS (1.43.4), claimed to the lab account and its
+  device removed, went on answering `claimed="1"` and `signInState="ok"` for the 30 s watched; once
+  restarted, its first access-token read was a 401, it logged `MyPlex: Token was invalid, resetting
+  security.`, emptied `PlexOnlineToken` and answered `/identity` `claimed="0"` and `/myplex/account`
+  `signInState="invalid"`, `mappingError="badauth"`. Whether a running PMS does the same on its own
+  schedule was not measured.
+
+What rex did at first, which was **not** what that PMS does (a start now drops it, below): rex kept the claim (the token
+gate, `claim_state.json`, `claimed="1"`) and never drops or exchanges one on its own, since a claim
+redeemed again is what reset the account's tokens on 2026-09-11. It records the refusal instead
+(`plextv::verdict`): a 401 to a call made with the claim's current token -- the access-token read,
+the owner read, the webhooks, the resources check, the device PUT, `servers.xml` -- marks the claim
+refused, logged once as a WARNING; a 2xx from one of them clears it (an INFO). A 403, a 5xx and a
+network failure leave it as it is, as do pubsub (403 here), the features read (200 here) and
+rex-direct, whose 401 is its provider's (a wrong `REX_DIRECT_KEY` is one too) and which was off in
+the measurement. Those signs only have plex.tv asked (`plextv::suspect`, below). The refusal is kept
+in memory only: a restart finds it again on its first calls.
+
+It is shown at `GET /rex/claim`, rex's own and answered only to rex's own networks with no token
+(the gate `POST /myplex/claim` keeps unclaimed): `{"claimed": bool, "refused": bool,
+"refused_since": <unix seconds> | null, "owner": <username> | null}`. Nothing is added to
+`/identity` or `/myplex/account`, which Plex clients parse. A refused claim takes a new
+`POST /myplex/claim?token=` from those networks with no token, through the same exchange as a
+first claim: on success `claim_state.json` holds the new claim alone (no features, cursor or
+access tokens of the old one), the old list stops letting its account in, the new one is read, and
+`servers.xml`, the device PUT and the owner refresh run at once; the refused claim's pubsub loop,
+heartbeat and rex-direct pick up the new token on their next turn. A working claim still answers
+another claim 409 (401 with no token, from the gate, as before). `tests/test_plextv.py`,
+`refused_claim`.
+
+**Dropped at a start, as the PMS does (Ben, later on 2026-11-16).** A running rex still only marks
+the refusal. A start whose first call, the access-token read, plex.tv answers 401 drops the claim
+(`plextv::drop_refused_claim`), logging `Token was invalid, resetting security` as plexlab's PMS did:
+`claim_state.json` keeps the machineIdentifier and version and loses the token, owner, account id,
+features and access lists, nothing is registered with the dead token (no `servers.xml`, no pubsub),
+`/identity` says `claimed="0"` and `GET /rex/claim` `{"claimed": false, ...}`, which the zurg app and
+rex-android already read as Sign in to Plex. The PMS's `/myplex/account` then answered
+`signInState="invalid"`, `mappingError="badauth"`; rex answers that path 401 to everyone while unclaimed
+(its unclaimed gate), so there is nothing to mirror. A 403, a 5xx or no answer at a start keeps the
+claim, and the running refusal path takes over. Live on zen, lab account: a scratch rex claimed, its
+device removed (19:00:03 UTC) and rex stopped, then started at 19:00:17.75: its first calls were 401,
+the claim was dropped at 19:00:18 and `/rex/claim` said unclaimed from 19:00:19; a new claim token
+POSTed from the LAN was taken in 0.8 s and the server listed again. `tests/test_plextv.py`,
+`refused_claim` (`pms_restart` in the fixture).
+
+Run live the same day on the lab rex whose device was removed: `GET /rex/claim` answered
+`"refused": true` from the first second, a new claim token POSTed with no token from the LAN was
+exchanged, and the new token's next calls answered 200 (access tokens, owner, webhooks, resources,
+device PUT; `servers.xml` its usual 422) and plex.tv listed the server again. **The access-token
+read made a second after the exchange answered 403** and the same call 200 a minute later: a fresh
+server token is not yet everywhere on plex.tv, one more reason a 403 marks nothing.
+
+**Seen within seconds, not at the heartbeat** (measured later the same day on zen, lab account,
+`REX_DIRECT_URL=off`). Of the calls above only the 600 s heartbeat ran on its own, so a running rex
+marked the removal at its next beat: 9 min 22 s on the Fire TV Cube, 6 min 18 s and 6 min 21 s for two
+scratch rex (ae2d690c and a build that asked plex.tv on pubsub's 403 alone) whose devices were removed
+together. Neither got a 403: **plex.tv left the removed server's pubsub stream open**, still sending
+its `: -1` keepalive every 10 s, and sent `notifyFavoritesChange` on it twice in the second of the
+removal (0.47 to 0.6 s after the DELETE began, before it returned; the fixture's
+`pubsub_after_removal`). The same message reaches the account's other servers, and came to both
+when another server of the account was claimed; the removed server got no later ones. The removed
+token's access-token read, asked every 0.5 s, answered 200 up to 0.13 to 0.22 s before the DELETE
+and 401 from the first read after it returned (0.65 to 0.74 s). The patron's and the Cube's pubsub
+403s come from subscribing again once a stream has ended; why theirs ended is not known.
+
+So `notifyFavoritesChange`, a pubsub 403 and rex-direct's provider answering 401 or 403 each have
+the access-token read asked (`plextv::suspect`), the notice 5 s on (`SUSPECT_NOTIFY_DELAY`), the
+others at once; its 401 marks the claim as any 401 does, a 403, a 5xx or a 200 marks nothing. One
+check at a time and one a minute at most (`SUSPECT_GAP`), the gap doubling to 10 min while the read
+fails without a 401 and back to a minute once it is answered; a sign inside the gap is checked when
+the gap ends, not dropped, and none is checked while the claim is already refused. Nothing is
+exchanged or dropped. Measured with that build: a removal was marked **6.1 s** after the DELETE, and
+29.6 s after one that came 36 s after a check (another server's claim had sent the notice), the
+check waiting for the minute's end: at most about 65 s while the checks are answered (after a 403,
+a 5xx or a network failure the gap grows, to 10 min at most). Two fresh claims read their access
+tokens 200 from the first second (40 reads), so the early 403 above was not seen again; a notice with the
+token working had it asked once, 200, nothing marked. No check on a timer was added, since the
+notice came on every removal measured. Not measured: whether Authorized Devices' Remove or a password
+change send the notice (signing out of all devices sends another, below), and rex-direct's provider live (off throughout;
+`tests/test_rex_direct.py` drives it against a stub). `tests/test_plextv.py`, `refused_claim`.
+
+**Signing out of all devices** (measured later the same day on zen, lab account, twice). Plex Web has
+no button of that name: it is the account page's password change with "Sign out connected devices
+after password change" checked (`resetDevices`, also offered when two-factor is turned on), which
+saves as `PUT clients.plex.tv/api/v2/user?includeSubscriptions=1&includeProviders=1&...` with
+`password`, `passwordConfirmation`, `currentPassword` and `resetDevices: true`. plex.tv took the
+unchanged password and answered 204 when the request named itself Plex Web, and 403 code 1068 "This
+action is not available for this device." under another `X-Plex-Product`. The servers' tokens and the
+caller's own answered 401 afterwards (the page says it signs out "all claimed servers and client
+applications"; the other devices' tokens were not read), while all 43 device rows stayed, so a
+signed-out server is not missing from Authorized Devices. Its open pubsub stream stayed open and got
+`notifyResetToken` 2.05 s and 2.30 s after the PUT began, then `notifyAccountChange` 0.07 s later
+(`pubsub_after_sign_out_everywhere`, the raw lines read on a second server's stream), and the server
+token's access-token read answered 401 from 2.28 s and 2.58 s. Nothing else came: rex 88ffee06, its
+heartbeat an hour away, still said `"refused": false` 66 s on and would have waited for its next beat
+(up to 10 min). So `notifyResetToken` now has the access-token read asked as `notifyFavoritesChange`
+does, 5 s on: the second run marked the claim 7.7 s after the PUT and `GET /rex/claim` said refused
+8.6 s after it. On the lab account that is, by plex.tv's own description, the Pixel 6's Plex for Android, Plezy
+and zurg+rex apps and the servers on it, plexav on kids, every Plex Web session and Plexamp.
+Not measured: whether a real password change or two-factor's option sends the same notice.
+
+## The provider's address, taken for the server's (2026-11-16)
+
+On the Fire TV Cube (zurg app sign-in, rex ae2d690c, DMM's rex-direct provider) a first claim was
+listed by plex.tv's `/api/v2/resources` only 3 to 3.5 min after it, though rex's log ran as on any
+claim: the provider's 403 0.5 s after the exchange, `servers.xml` at 1.0 s, pubsub at 1.5 s, no
+failed announce. 55 s in, its device row already held its LAN connection but
+`publicAddress="128.140.121.142"`: dmm-01, the host DMM's provider runs on, not the home line, and
+`lastSeenAt` was the second of the provider's call. It was listed between +184 s and +211 s, and
+rex's first heartbeat beat (600 s from its start at 10:11:56) fell at +195 s; a beat that succeeds logs
+nothing, so that this beat listed it is inferred from the timing.
+
+Measured on zen the same day with the lab account (`tests/fixtures/plextv_provider_address_2026_11_16.json`),
+scratch rex 841e7bc6, a 3600 s heartbeat so no beat fell in the window, the provider a stand-in on
+dmm-01 making DMM's `plexServerOwner` calls header for header:
+
+| Claim | Runs | First listed |
+|---|---|---|
+| rex-direct off | 3 | 5.1 to 5.3 s |
+| re-claim after its device was removed, off | 1 | 5.1 s |
+| DMM's real provider (dmm-01), once, stopped before its minute retry | 1 | 5.2 s |
+| a real PMS (pms-docker 1.43.5, new config) | 1 | 2.5 s (the first poll) |
+| provider on dmm-01, its write applied before rex's announce | 11 | 5.3 to 8.7 s |
+| provider on dmm-01, its write applied after rex's announce | 3 | not in 240 s, 900 s, 900 s |
+
+- **A request made with the server's token is the server's to plex.tv, from wherever it comes.** The
+  provider's `GET /api/v2/resources` from dmm-01 set the server's `publicAddress` to dmm-01's, with the
+  server's machineIdentifier as `X-Plex-Client-Identifier` and equally with the provider's own (6 of 6
+  runs; with none plex.tv answers 400 `X-Plex-Client-Identifier is missing`). No device row was made
+  for the provider's identifier.
+- **A server whose `publicAddress` is not its own is left out of `/api/v2/resources`**, presence true,
+  connection and all. The next device PUT from the server puts the address back and lists it within
+  the second (one announce-shaped PUT, 200). Without one it stays out: three runs held out until they
+  were stopped, the Cube until its heartbeat.
+- **On a first claim it is a race.** rex asks its provider before its `servers.xml` and device PUT
+  (`finish_claim`), so the provider's call comes first, but plex.tv applies its write when it does:
+  in 11 runs before the announce, which then wins, in 3 after it, seen 5.4 to 7.8 s after the claim.
+- **Any call does it, not only the first.** A listed server asked once from dmm-01 ~15 s after its
+  claim was gone from the list within a second, 8 of 8 (`provider_after_announce`). Not every call
+  moved an old row: five calls to one listed 18 min had no effect, one to another listed 9 min did;
+  what decides that was not found. So DMM's minute retries and 6-hourly re-registration can hide a
+  running server until its next beat, up to 10 min; that was not measured on a live rex-direct.
+- A rex announcing no connection at all (bound to loopback) was not listed in 600 s.
+
+So rex looks for itself after each provider call (`plextv::settle_after_provider`): 10, 30 and 70 s
+after it, it reads `/api/v2/resources` as the heartbeat does, now matched on the machineIdentifier
+rather than the name (an account can hold several servers named alike), and announces again when
+the read leaves it out, then stops; a read that fails (a refused token, plex.tv down) or a server with no
+address to announce is left to the heartbeat rather than logged three more times per provider call. The provider is not changed: no header keeps its call off the server's row.
+`tests/test_rex_direct.py` leg 4c, the provider's write landing 7.8 s on as the latest measured did.
+
+Live on zen with the fix (88ffee06), the provider stand-in on dmm-01 answering its 403 at once and asking
+plex.tv 3 s later, so its write lands after the claim's announce every time: 841e7bc6 was listed at
+5.4 s, gone at 8.7 s and still gone at 100 s; the fix's server lost its address at 5.4 s, logged `not in
+/api/v2/resources after rex-direct's provider asked plex.tv; announced again` 11 s after the claim and
+was listed from 15.4 s to the end. Six more fixed claims through the plain stand-in were listed in 5.1
+to 5.5 s and never needed the second announce, the provider's minute retry included.

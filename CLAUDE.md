@@ -130,7 +130,7 @@ Where things live in `rust/src/`:
 | `runtime/source.rs`, `runtime/feed.rs`, `runtime/scan.rs` | Sources (registered over `PUT /rex/sources/{name}`, kept in the state file, deleted with a confirmation: where a Part's bytes are), the feed API sources push items to, open to any peer on a private network (`feed::source_peer`, `docs/feed-api.md`), and the rows those items become: added, held until probed, filled, re-identified, trashed, keys minted once (`mint_key`); a show's file its source did not place is numbered in its release's file order (`number_unplaced`), never by its name; and what a person matched, listed back to its source (`feed_matches`: rows marked `_matched`/`_matched_at`, versions a merge moved marked on their Media) |
 | `runtime/universal.rs` | The video transcoder (`REX_TRANSCODER`): the conversion decision's plan and Media, `start.m3u8`/`start.mpd`, segments served outside the runtime lock, one FFmpeg per session with the hardware ladder, seeks, throttling and the idle reaper, and the `TranscodeSession` rows |
 | `runtime/livetv.rs` | Live TV: a live channel a source pushed with a `channel` is a channel of one DVR (`docs/feed-api.md`, "Live TV"), answered as plexav's (a PMS with an HDHomeRun and an XMLTV guide, no Plex Pass, so no Record): the provider, the guide, What's On, pages, search and the tune, whose session plays the channel row's own live conversion (findings, "Live TV") |
-| `runtime/subtitles.rs` | Subtitle search, apply and automatic subtitles: Plex's provider alone (`streams/matches`, claimed only; no addons), ranked by release name, each kept candidate measured against the release (its embedded text track through `mkvsubs`, else with `REX_TRANSCODER` six 90 s audio windows), corrected by a shift or a frame-rate ratio and stored as UTF-8 (`_content`); automatic jobs start on the detail request and play-queue creation, only a play's reads audio (a detail request's unchecked pick is checked and fixed in place on play), and the decision waits up to 3 s for one (findings, "Subtitle search and automatic subtitles") |
+| `runtime/subtitles.rs` | Subtitle search, apply and automatic subtitles: Plex's provider alone (`streams/matches`, claimed only; no addons), ranked by release name, each kept candidate measured against the release (its embedded text track through `mkvsubs`, else with `REX_TRANSCODER` six 90 s audio windows), corrected by a shift or a frame-rate ratio and stored as UTF-8 (`_content`); automatic jobs start on the detail request, play-queue creation and the decision, each for one version (the decision's `mediaIndex`, kept for an item of several; a search or apply with no `mediaItemID` follows it), only a play's reads audio (a detail request's unchecked pick is checked and fixed in place on play), and the decision waits up to 3 s for one (findings, "Subtitle search and automatic subtitles") |
 | `runtime/plexmeta.rs`, `identify.rs` | Plex's metadata agent (the claim's server token), and which title a release is: the ids its source placed it with, or a TMDB id set by hand at the source (`placed`; `scan::identified_by`), asking Plex's agent for its guid by external id, whose answer and children rows are all a row shows (`metadata::describe`); nothing is read off a name, and what arrives with neither stays for Fix Match, which searches Plex's agent |
 | `runtime/plextv.rs` | claim/heartbeat/account state (`REX_PLEXTV_URL` points plex.tv and Plex's agent at a stub) |
 | `runtime/rexdirect.rs` | rex-direct, a plex.direct of rex's own (`docs/rex-direct-api.md`): on by default, once claimed it registers the machineIdentifier with the claim's server token at its provider (`REX_DIRECT_URL`, DMM's by default, `off`, https or loopback only; `REX_DIRECT_KEY` an optional bearer key), serves the certificate it answers by SNI beside `--tls-cert`'s (`Certificates`, the TLS port's cert resolver), appends `https://<name>:<REX_DIRECT_PORT or --port>` to the announce, keeps the answer in `rex-direct.json`, and registers again every 6 h (10 min after a failure, a 202's `retryAfter` within 15 s..10 min); unclaimed it waits in `PlexTv::direct` for the claim (`plextv::finish_claim`) |
@@ -241,7 +241,7 @@ A claimed rex announces with the claim's server token only; unclaimed it waits f
 claim and announces the moment it lands, no restart (findings, "A
 claimed server needs no account token"). It announces its own LAN address
 (`http://<private_address>:<port>`, read again at each announce; the bound address under `--host`;
-only an RFC 1918 or ULA one, never loopback, a tunnel's, a public one or 100.64/10, nor one on a container network, which `lan_interface_address` tells by the default route's veth and says once in the log) with no
+only an RFC 1918 or ULA one, never loopback, a tunnel's, a public one or 100.64/10, nor one on a container network, which `lan_interface_address` tells by the default route's veth inside a Docker, Podman or Kubernetes container (its marker; an LXC's bridged veth is the LAN's, rex#22) and says once in the log) with no
 flag, as a real PMS announces its interfaces (`pms_announce_connections_s1422.json`), after
 `--announce-url`'s comma-separated list of extra addresses, each its own connection; a setup
 names only an HTTPS address of its own there (2026-10-24: every guide used to type the LAN IP).
@@ -274,7 +274,11 @@ the private key) and serves a start the provider does not answer. A 202 is a pro
 issuing the certificate: an INFO, asked again after its `retryAfter` (15 s..10 min). Any other
 refusal or an unreachable provider is a WARN and never fatal. A thread registers again every
 6 h, which is the dynamic DNS and swaps in a renewed certificate without a restart, and every
-10 min after a failure. `tests/test_rex_direct.py` drives it against a stub provider and plex.tv.
+10 min after a failure. The provider's plex.tv check with the token makes plex.tv take the provider's
+address for the server's and drop it from `/api/v2/resources` until rex announces again, so 10, 30 and
+70 s after each registration rex looks for itself there (by machineIdentifier) and announces when
+missing (`plextv::settle_after_provider`; findings, "The provider's address, taken for the server's").
+`tests/test_rex_direct.py` drives it against a stub provider and plex.tv.
 
 A real claim -- `POST /myplex/claim?token=` with a token from `plex.tv/api/claim/token.json`,
 once per machineIdentifier -- makes rex register the way a real PMS does (findings, "The
@@ -302,7 +306,16 @@ no account token: `PLEX_TOKEN` is not read since 2026-10-19. An unclaimed server
 nothing: plex.tv applies a device PUT to the device that owns the token, so the 2026-09-11
 spike's unclaimed announce with zurg's account token rewrote the account's "zurg" device row
 (findings, "Collateral change to the Plex account"). A claimed server answers another claim
-with 409.
+with 409, unless plex.tv refuses its server token: a 401 to a call made with it (never a 403, 5xx
+or network failure) marks the claim refused until a 2xx, shown only at rex's own `GET /rex/claim`
+(rex's networks, no token; never in `/identity`), and a new claim from those networks replaces it.
+pubsub's `notifyFavoritesChange` (sent on a removed server's stream, which plex.tv keeps open),
+`notifyResetToken` (sent when the account signs out of all devices), a pubsub 403 and rex-direct's provider refusing the token mark nothing themselves: they have the access-token
+read asked, once a minute at most (`plextv::suspect`), so a removed device is marked in seconds, not
+at the 600 s heartbeat. A running rex never drops or re-exchanges a claim; a start whose first call, the
+access-token read, plex.tv answers 401 drops it as a real PMS does (`plextv::drop_refused_claim`: machine and
+library kept, `/identity` `claimed="0"`, `/rex/claim` unclaimed, so the apps offer Sign in to Plex), and a 403,
+5xx or no answer at a start keeps it (Ben, 2026-11-16; findings, "A claim whose device was removed").
 
 `rex.db`, `rex.env`, `run.sh` and `rex-direct.json` are gitignored: the catalog and
 `rex.env` carry account-scoped credentials, `rex-direct.json` a private key. `examples/catalog.example.json` keeps the shape.

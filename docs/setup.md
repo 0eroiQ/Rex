@@ -213,7 +213,12 @@ You then watch signed in as yourself, with your own watch state. Fix Match works
 the account rex is claimed with: rex refuses it (403) to the accounts it is shared with, as a
 real Plex Media Server does.
 
-A claimed rex refuses another claim (409). To move it to another account (the fresh one was
+A claimed rex refuses another claim (409), unless plex.tv no longer accepts its claim: removing
+the server under Authorized Devices should do that, and rex then logs `plex.tv refused the claim's
+server token` (within about a minute when the device was removed through plex.tv's API or the
+account signed out of all devices) and `curl -s http://<rex's LAN IP>:32400/rex/claim` says `"refused": true`. Claim it
+again as above, no restart: the new claim replaces the refused one. A rex started on a claim plex.tv
+refuses drops it, as a Plex Media Server does, and is simply unclaimed: claim it again. To move it to another account (the fresh one was
 lost or banned), stop it, remove `claim_state.json`, start it, claim again and share again. If
 the old account can still sign in, also remove the server there (app.plex.tv, Settings,
 Authorized Devices, Servers). Those two are the whole unclaim: rex has no sign-out, and

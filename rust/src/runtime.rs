@@ -729,6 +729,9 @@ pub struct Runtime {
     /// A subtitle apply or automatic search a route asked for (`subtitles.rs`), run on a
     /// thread of its own once the lock is released.
     pending_subtitle: Option<subtitles::Job>,
+    /// The version a playback decision last played of each item of several (`subtitles_decided`):
+    /// what automatic subtitles, and a search or apply naming no `mediaItemID`, are for.
+    played_media: HashMap<String, String>,
     pending_subtitle_read: Option<subtitles::ReadJob>,
     /// A VobSub's `.sub` a stream read asked for: read off the lock from its source (`vobsub_read`).
     pending_vobsub: Option<subtitles::VobSubRead>,
@@ -1063,6 +1066,7 @@ impl Runtime {
             agent_answers: HashMap::new(),
             pending_auto_collections: false,
             pending_subtitle: None,
+            played_media: HashMap::new(),
             pending_subtitle_read: None,
             pending_vobsub: None,
             analysis_jobs,
@@ -8738,14 +8742,16 @@ impl Runtime {
                 match query.get("token").filter(|token| !token.is_empty()) {
                     None => Response::error(400, "rex: missing claim token"),
                     // rex's own refusal: repeated exchanges are what reset the account's
-                    // tokens on 2026-09-11. Re-claiming means removing claim_state.json first.
+                    // tokens on 2026-09-11. A claim plex.tv refuses the token of (its device
+                    // removed, 2026-11-16) is the exception: a new claim replaces it.
                     Some(_)
                         if self
                             .plextv
                             .claim
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .claimed() =>
+                            .claimed()
+                            && !self.claim_refused() =>
                     {
                         Response::error(409, "rex: already claimed")
                     }
@@ -8761,6 +8767,7 @@ impl Runtime {
                 }
             }
             ("PATCH", "/myplex/claim") => Response::plain(500, b"500".to_vec()),
+            ("GET" | "HEAD", "/rex/claim") => self.route_rex_claim(),
             ("PUT", "/myplex/refreshReachability") => Response::empty(200),
             // server.py checks no verb on these four routes.
             (_, "/myplex/account") => self.myplex_account(),
@@ -9004,9 +9011,13 @@ impl Runtime {
             }
             ("GET" | "HEAD" | "OPTIONS", "/music/:/transcode/universal/decision") => self.route_music_decision(&query, request),
             ("GET" | "HEAD" | "OPTIONS", "/video/:/transcode/universal/decision") => {
-                // The item's subtitle job, if one is finding the account's subtitle, ends first.
+                // The item's subtitle job, if one is finding the account's subtitle, ends first:
+                // one for the version this decision plays, started here if none is.
                 let path = query.get("path").map(String::as_str).unwrap_or_default();
                 let key = path.split("/library/metadata/").nth(1).and_then(|tail| tail.split(['/', '?']).next()).unwrap_or("");
+                if request.method == "GET" {
+                    self.subtitles_decided(key, &query);
+                }
                 if self.subtitle_wait(key) {
                     Response::empty(200)
                 } else {
@@ -9103,6 +9114,11 @@ impl Runtime {
             ) && matches!(request.method.as_str(), "GET" | "HEAD"))
         {
             return true;
+        }
+        // rex's own claim state, and a new claim for one plex.tv refuses the token of: what an
+        // app on rex's own networks asks with no token, since the refused claim's lists none.
+        if path == "/rex/claim" || (path == "/myplex/claim" && self.claim_refused()) {
+            return self.local_request(request);
         }
         // An unclaimed server serves no client, only its claim (2026-10-19): with no claim it
         // has no token to ask Plex's agent with, so nothing it could show would have a name.
@@ -13830,7 +13846,7 @@ impl Runtime {
             let playing = queue.items.iter().find(|item| Some(item.id) == queue.selected).map(|item| item.rating_key.clone());
             self.queues.insert(id, queue);
             if let Some((key, row)) = playing.and_then(|key| Some((key.clone(), self.catalog.get(&key)?.clone()))) {
-                self.subtitles_wanted(&key, &row, true);
+                self.subtitles_wanted(&key, &row, true, None);
             }
             return response;
         }
@@ -18949,7 +18965,7 @@ impl Runtime {
             }
             // The requesting account's subtitle, found before its playback picks the tracks.
             if request.method == "GET" {
-                self.subtitles_wanted(key, row, false);
+                self.subtitles_wanted(key, row, false, None);
             }
             let checks_requested = ["checkFiles", "asyncCheckFiles", "checkFileAvailability"]
                 .iter()
@@ -24542,6 +24558,10 @@ fn handle_connection<S: Read + Write + PollRead>(
             // A route that needs Plex's agent asked for it (`agent_answer`): it is asked here
             // with the lock released, and the request routed again with its answer.
             for _ in 0..2 {
+                // A subtitle job the route started runs before anything waits on it (a decision's).
+                if let Some(job) = guard.pending_subtitle.take() {
+                    subtitles::spawn(&runtime, job);
+                }
                 let Some((key, call)) = guard.pending_agent.take() else {
                     break;
                 };
@@ -26703,27 +26723,43 @@ fn virtual_link(ifindex: &str, iflink: &str) -> bool {
     ifindex.trim() != iflink.trim()
 }
 
-/// Whether the address rex reaches the world from sits on a container network: Docker, Podman
-/// or LXC without host networking, where the default route leaves through a veth. Nothing
-/// outside that network reaches such an address, so it is no LAN address to announce or to
-/// hand rex-direct's provider; `--announce-url` names the real one. Linux only, where those
-/// networks live.
+/// Whether the address rex reaches the world from sits on a container engine's network: Docker,
+/// Podman or Kubernetes without host networking, where the default route leaves through a
+/// virtual link. Nothing outside that network reaches such an address, so it is no LAN address to
+/// announce or to hand rex-direct's provider; `--announce-url` names the real one. A virtual link
+/// alone is no such network: an LXC container (or a bare network namespace) on a bridge to the
+/// LAN leaves through a veth too, with the LAN's own address (rex#22, measured on zen 2026-11-15,
+/// `lxc_bridge_eth0.txt`: eth0 2/920, 192.168.10.128/24), and it leaves no engine's marker.
+/// Linux only, where those networks live.
 fn on_container_network() -> bool {
     #[cfg(target_os = "linux")]
     {
         let read = |path: String| std::fs::read_to_string(path).ok();
-        let Some(iface) = read("/proc/net/route".to_string()).and_then(|table| default_route_interface(&table)) else {
-            return false;
-        };
-        let (Some(ifindex), Some(iflink)) =
-            (read(format!("/sys/class/net/{iface}/ifindex")), read(format!("/sys/class/net/{iface}/iflink")))
-        else {
-            return false;
-        };
-        virtual_link(&ifindex, &iflink)
+        // Docker's `/.dockerenv` (measured on zen, 2026-11-15), Podman's `/run/.containerenv`, and
+        // the variable the kubelet sets in every pod. Unmeasured: rootless Docker's marker, and
+        // that a containerd pod leaves neither file.
+        let engine = std::path::Path::new("/.dockerenv").exists()
+            || std::path::Path::new("/run/.containerenv").exists()
+            || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some();
+        let table = read("/proc/net/route".to_string()).unwrap_or_default();
+        container_network(&table, engine, |iface| {
+            Some((read(format!("/sys/class/net/{iface}/ifindex"))?, read(format!("/sys/class/net/{iface}/iflink"))?))
+        })
     }
     #[cfg(not(target_os = "linux"))]
     false
+}
+
+/// `on_container_network` off what it read: the route table, whether a container engine left
+/// its marker, and an interface's `ifindex` and `iflink`.
+// ponytail: a Docker macvlan with a LAN address is still refused -- its sysfs reads as a veth's
+// (zen 2026-11-15); telling them apart needs the driver's name (ethtool), not read here.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn container_network(route_table: &str, engine: bool, link: impl Fn(&str) -> Option<(String, String)>) -> bool {
+    engine
+        && default_route_interface(route_table)
+            .and_then(|iface| link(&iface))
+            .is_some_and(|(ifindex, iflink)| virtual_link(&ifindex, &iflink))
 }
 
 /// `local_interface_address` when it is an address other devices on the LAN can reach: not one
@@ -30085,6 +30121,22 @@ mod announce_tests {
         // The bridged container's eth0 read 2/87, the host's eno1 and a host-networked container's 2/2.
         assert!(virtual_link("2\n", "87\n"));
         assert!(!virtual_link("2\n", "2\n"));
+    }
+
+    #[test]
+    fn an_lxc_containers_bridged_veth_is_a_lan_address() {
+        // rex#22: an LXC container on a bridge to the LAN, as reproduced on zen on 2026-11-15 (a
+        // network namespace, a veth on a bridge, 192.168.10.128/24 and its default route; eth0
+        // 2/920). A veth, but no Docker, Podman or Kubernetes marker: the address is the LAN's.
+        let lxc = include_str!("../../tests/fixtures/proc_net_route/lxc_bridge_eth0.txt");
+        let bridged = include_str!("../../tests/fixtures/proc_net_route/docker_bridge_eth0.txt");
+        let host = include_str!("../../tests/fixtures/proc_net_route/zen_host_eno1.txt");
+        let link = |ifindex: &'static str, iflink: &'static str| move |_: &str| Some((ifindex.to_string(), iflink.to_string()));
+        assert!(!container_network(lxc, false, link("2\n", "920\n")), "an LXC's bridged veth announces its LAN address");
+        // Docker's bridge (2/87, /.dockerenv) still announces none; its host networking (2/2) does.
+        assert!(container_network(bridged, true, link("2\n", "87\n")));
+        assert!(!container_network(host, true, link("2\n", "2\n")));
+        assert!(!container_network("", true, link("2\n", "87\n")), "no default route");
     }
 
     #[test]
